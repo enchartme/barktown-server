@@ -50,6 +50,7 @@ import {
   listDiaryEntries, getDiaryEntry, deleteDiaryEntryRow,
   upsertHitMetadata, getHitMetadata, deleteHitMetadataRow,
   upsertSample,
+  listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 import { generateWaveform } from "./lib/audio.mjs";
@@ -212,13 +213,37 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
   return getHitMetadata(db, req.params.id);
 });
 
+// ─── Monitor params (single source of truth for barktown-goblin's bark-monitor
+// tuning, also used as this API's reanalyze defaults) ─────────────────────────
+
+// List all monitor params (current + default value, allowed range, description).
+app.get("/api/monitor-params", async () => {
+  return listMonitorParams(db);
+});
+
+// Update one monitor param's current value. barktown-goblin picks this up
+// next time its statusd POSTs /monitor-params/fetch (or the monitor process's
+// own periodic re-check runs); this route itself only updates the DB.
+app.patch("/api/monitor-params/:paramId", async (req, reply) => {
+  const { value } = req.body ?? {};
+  try {
+    const updated = setMonitorParam(db, req.params.paramId, value);
+    log(`Updated monitor param ${req.params.paramId} = ${value}`);
+    return updated;
+  } catch (e) {
+    reply.code(400);
+    return { error: e.message };
+  }
+});
+
 // Re-analyze a diary clip: re-score its archived, uncompressed source WAV
 // with YAMNet + the bark classifier (barktown-utils' tools/reanalyze_clip.py)
 // and upsert the resulting hit-metadata. Synchronous — the client waits for
 // inference to finish (typically a few seconds per minute of audio).
 //
-// Optional body fields override the tuning defaults in CFG.reanalyze for
-// this one run (e.g. from a UI control): candidateThreshold, hitRefractoryS,
+// Detection tuning defaults come from the monitor_params DB table (the same
+// values barktown-goblin's live monitor uses); optional body fields override
+// them for this one run: candidateThreshold, hitRefractoryS,
 // inferenceWindowS, scoreIntervalS — all positive finite numbers.
 app.post("/api/diary/:id/reanalyze", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
@@ -240,12 +265,13 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
     reply.code(400);
     return { error: tuningError };
   }
+  const monitorParams = getMonitorParamsMap(db);
   const { candidateThreshold, hitRefractoryS, inferenceWindowS, scoreIntervalS } = req.body ?? {};
-  const tuningOverrides = {
-    ...(candidateThreshold !== undefined && { candidateThreshold }),
-    ...(hitRefractoryS     !== undefined && { hitRefractoryS }),
-    ...(inferenceWindowS   !== undefined && { inferenceWindowS }),
-    ...(scoreIntervalS     !== undefined && { scoreIntervalS }),
+  const tuning = {
+    candidateThreshold: candidateThreshold ?? monitorParams.candidate_threshold,
+    hitRefractoryS:     hitRefractoryS     ?? monitorParams.hit_refractory_s,
+    inferenceWindowS:   inferenceWindowS   ?? monitorParams.inference_window_s,
+    scoreIntervalS:     scoreIntervalS     ?? monitorParams.score_interval_s,
   };
 
   const tmpPath = path.join(os.tmpdir(), `reanalyze-${entry.id}-${Date.now()}.wav`);
@@ -260,7 +286,7 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
 
     let payload;
     try {
-      payload = await runReanalyzeScript(CFG, tmpPath, tuningOverrides);
+      payload = await runReanalyzeScript(CFG, tmpPath, tuning);
     } catch (e) {
       err(`reanalyze: scoring failed for ${entry.id}: ${e.message}`);
       reply.code(502);
