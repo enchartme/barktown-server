@@ -315,11 +315,16 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       diaryId: entry.id,
     });
     if (hitMeta && hitMeta.timestamps.length > 0) {
+      // timestamps[i] is the *end* anchor of the detection window (see
+      // AudioPlayerPanel's hx comment), not the start — so the fragment
+      // must end there, with its start pushed back by the padding margin
+      // goblin added around the event (config's padding_s).
       for (let i = 0; i < hitMeta.timestamps.length; i++) {
-        const startSec = hitMeta.timestamps[i];
+        const endSec = hitMeta.timestamps[i];
+        const startSec = Math.max(0, parseFloat((endSec - hitMeta.paddingS).toFixed(3)));
         insertAnnotation(db, newParsed.id, {
           startSec,
-          endSec: parseFloat((startSec + 1.5).toFixed(3)),
+          endSec: parseFloat(endSec.toFixed(3)),
           label: "bark",
           source: "model",
         });
