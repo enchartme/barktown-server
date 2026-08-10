@@ -41,7 +41,8 @@ import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
-import { buildDiarySampleMove } from "./lib/diary-samples.mjs";
+import { buildDiarySampleMove, archiveSourceKeyForEntry } from "./lib/diary-samples.mjs";
+import { runReanalyzeScript } from "./lib/reanalyze.mjs";
 import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
@@ -101,6 +102,54 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
   return null;
 }
 
+/**
+ * Validate a hit-metadata payload (own submissions from barktown-goblin, or
+ * the JSON produced by tools/reanalyze_clip.py). Returns an error string, or
+ * null if valid.
+ */
+function validateHitMetadataPayload({ timestamps, confidences, loudnesses }) {
+  if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
+    return "timestamps, confidences and loudnesses must be arrays";
+  }
+  const n = timestamps.length;
+  if (confidences.length !== n || loudnesses.length !== n) {
+    return "timestamps, confidences and loudnesses must have the same length";
+  }
+  if (!timestamps.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
+    return "timestamps must be non-negative finite numbers";
+  }
+  if (!confidences.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1)) {
+    return "confidences must be numbers in [0, 1]";
+  }
+  if (!loudnesses.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
+    return "loudnesses must be non-negative finite numbers";
+  }
+  return null;
+}
+
+// Detection-tuning fields accepted by POST /api/diary/:id/reanalyze, and the
+// range each must fall within (mirrors reanalyze_clip.py's own argparse
+// bounds implicitly — the script doesn't clamp, so do it here).
+const REANALYZE_TUNING_FIELDS = {
+  candidateThreshold: { min: 0, max: 1 },
+  hitRefractoryS:     { min: 0 },
+  inferenceWindowS:   { min: 0 },
+  scoreIntervalS:     { min: 0 },
+};
+
+/** Validate optional detection-tuning overrides. Returns an error string, or null if valid. */
+function validateReanalyzeTuning(body) {
+  for (const [field, { min, max }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+    const value = body?.[field];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < min || (max !== undefined && value > max)) {
+      const range = max !== undefined ? `[${min}, ${max}]` : `>= ${min}`;
+      return `${field} must be a number ${range}`;
+    }
+  }
+  return null;
+}
+
 /** Stat an object, returning null only for a genuine not-found response. */
 async function statObjectIfExists(objectKey) {
   try {
@@ -146,26 +195,10 @@ app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
 app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
   const { timestamps, confidences, loudnesses, padding_s: paddingS, window_s: windowS } = req.body ?? {};
 
-  if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
+  const error = validateHitMetadataPayload({ timestamps, confidences, loudnesses });
+  if (error) {
     reply.code(400);
-    return { error: "timestamps, confidences and loudnesses must be arrays" };
-  }
-  const n = timestamps.length;
-  if (confidences.length !== n || loudnesses.length !== n) {
-    reply.code(400);
-    return { error: "timestamps, confidences and loudnesses must have the same length" };
-  }
-  if (!timestamps.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
-    reply.code(400);
-    return { error: "timestamps must be non-negative finite numbers" };
-  }
-  if (!confidences.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1)) {
-    reply.code(400);
-    return { error: "confidences must be numbers in [0, 1]" };
-  }
-  if (!loudnesses.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
-    reply.code(400);
-    return { error: "loudnesses must be non-negative finite numbers" };
+    return { error };
   }
 
   upsertHitMetadata(db, req.params.id, {
@@ -177,6 +210,83 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
   });
   reply.code(201);
   return getHitMetadata(db, req.params.id);
+});
+
+// Re-analyze a diary clip: re-score its archived, uncompressed source WAV
+// with YAMNet + the bark classifier (barktown-utils' tools/reanalyze_clip.py)
+// and upsert the resulting hit-metadata. Synchronous — the client waits for
+// inference to finish (typically a few seconds per minute of audio).
+//
+// Optional body fields override the tuning defaults in CFG.reanalyze for
+// this one run (e.g. from a UI control): candidateThreshold, hitRefractoryS,
+// inferenceWindowS, scoreIntervalS — all positive finite numbers.
+app.post("/api/diary/:id/reanalyze", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  let sourceKey;
+  try {
+    sourceKey = archiveSourceKeyForEntry(entry, CFG);
+  } catch (e) {
+    reply.code(400);
+    return { error: e.message };
+  }
+
+  const tuningError = validateReanalyzeTuning(req.body);
+  if (tuningError) {
+    reply.code(400);
+    return { error: tuningError };
+  }
+  const { candidateThreshold, hitRefractoryS, inferenceWindowS, scoreIntervalS } = req.body ?? {};
+  const tuningOverrides = {
+    ...(candidateThreshold !== undefined && { candidateThreshold }),
+    ...(hitRefractoryS     !== undefined && { hitRefractoryS }),
+    ...(inferenceWindowS   !== undefined && { inferenceWindowS }),
+    ...(scoreIntervalS     !== undefined && { scoreIntervalS }),
+  };
+
+  const tmpPath = path.join(os.tmpdir(), `reanalyze-${entry.id}-${Date.now()}.wav`);
+  try {
+    try {
+      await download(mc, CFG.bucket, sourceKey, tmpPath);
+    } catch (e) {
+      err(`reanalyze: could not download source "${sourceKey}" for ${entry.id}: ${e.message}`);
+      reply.code(502);
+      return { error: `archived source not found in MinIO: ${sourceKey}` };
+    }
+
+    let payload;
+    try {
+      payload = await runReanalyzeScript(CFG, tmpPath, tuningOverrides);
+    } catch (e) {
+      err(`reanalyze: scoring failed for ${entry.id}: ${e.message}`);
+      reply.code(502);
+      return { error: `re-analysis failed: ${e.message}` };
+    }
+
+    const validationError = validateHitMetadataPayload(payload);
+    if (validationError) {
+      err(`reanalyze: reanalyze_clip.py produced an invalid payload for ${entry.id}: ${validationError}`);
+      reply.code(502);
+      return { error: `re-analysis produced an invalid payload: ${validationError}` };
+    }
+
+    upsertHitMetadata(db, entry.id, {
+      timestamps: payload.timestamps,
+      confidences: payload.confidences,
+      loudnesses: payload.loudnesses,
+      paddingS: typeof payload.padding_s === "number" ? payload.padding_s : 0,
+      windowS: typeof payload.window_s === "number" && payload.window_s > 0 ? payload.window_s : 1.5,
+    });
+    log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
+    reply.code(201);
+    return getHitMetadata(db, entry.id);
+  } finally {
+    fs.rm(tmpPath, { force: true }, () => {});
+  }
 });
 
 // Delete a diary entry: removes the audio + waveform objects from MinIO and
