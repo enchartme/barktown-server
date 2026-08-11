@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { openDb, upsertSample, upsertDiaryEntry } from "../lib/db.mjs";
+import { openDb, upsertSample, upsertDiaryEntry, upsertHitMetadata } from "../lib/db.mjs";
 import { startTestServer } from "./helpers/test-server.mjs";
 
 let tmpDir;
@@ -43,6 +43,32 @@ before(async () => {
     datetimeLocal: "2026-01-02T13:14:15",
     durationSec: 8,
     kind: "audio",
+  });
+  upsertHitMetadata(seedDb, "2026-01-02_13-14-15_false-positive", {
+    timestamps: [1], confidences: [0.91], loudnesses: [1.1], paddingS: 1.5, windowS: 1.5,
+  });
+
+  for (const [day, second] of [["03", 2], ["04", 3]]) {
+    const id = `2026-01-${day}_13-14-15_auto`;
+    upsertDiaryEntry(seedDb, {
+      id,
+      filename: `2026-01-${day} 13-14-15 auto.mp3`,
+      audioPath: `audio/2026/01/2026-01-${day} 13-14-15 auto.mp3`,
+      waveformPath: null,
+      label: "-A- auto",
+      date: `2026-01-${day}`,
+      time: "13:14",
+      datetimeLocal: `2026-01-${day}T13:14:15`,
+      durationSec: 8,
+      kind: "audio",
+    });
+    upsertHitMetadata(seedDb, id, {
+      timestamps: [second], confidences: [0.92], loudnesses: [1.2], paddingS: 1.5, windowS: 1.5,
+    });
+  }
+  // Metadata can arrive before asynchronous diary ingestion creates its row.
+  upsertHitMetadata(seedDb, "orphan-clip", {
+    timestamps: [4], confidences: [0.93], loudnesses: [1.3], paddingS: 1.5, windowS: 1.5,
   });
 
   server = await startTestServer({ dbPath });
@@ -87,6 +113,56 @@ test("GET /api/samples/:id returns the seeded sample", async () => {
 test("GET /api/samples/:id returns 404 for an unknown id", async () => {
   const res = await fetch(`${server.baseUrl}/api/samples/does-not-exist`);
   assert.equal(res.status, 404);
+});
+
+test("GET /api/hit-metadata paginates and advertises the next and final pages", async () => {
+  const firstRes = await fetch(`${server.baseUrl}/api/hit-metadata?page=1&pageSize=2`);
+  assert.equal(firstRes.status, 200);
+  const first = await firstRes.json();
+  assert.equal(first.items.length, 2);
+  assert.equal(first.pagination.totalRecords, 4);
+  assert.equal(first.pagination.totalPages, 2);
+  assert.equal(first.pagination.hasNextPage, true);
+  assert.equal(first.pagination.isLastPage, false);
+  assert.equal(first.pagination.complete, false);
+  assert.equal(first.pagination.nextPage, 2);
+  assert.match(first.links.next, /page=2/);
+  assert.match(firstRes.headers.get("link") ?? "", /rel="next"/);
+
+  const secondRes = await fetch(`${server.baseUrl}${first.links.next}`);
+  assert.equal(secondRes.status, 200);
+  const second = await secondRes.json();
+  assert.equal(second.items.length, 2);
+  assert.equal(second.pagination.hasNextPage, false);
+  assert.equal(second.pagination.isLastPage, true);
+  assert.equal(second.pagination.complete, true);
+  assert.equal(second.pagination.nextPage, null);
+  assert.equal(second.links.next, null);
+  const orphan = second.items.at(-1);
+  assert.equal(orphan.clipId, "orphan-clip");
+  assert.equal(orphan.date, null);
+  assert.deepEqual(orphan.timestamps, [4]);
+});
+
+test("GET /api/hit-metadata filters inclusively by diary date", async () => {
+  const res = await fetch(`${server.baseUrl}/api/hit-metadata?startDate=2026-01-03&endDate=2026-01-03`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.pagination.totalRecords, 1);
+  assert.equal(body.items[0].clipId, "2026-01-03_13-14-15_auto");
+  assert.equal(body.items[0].date, "2026-01-03");
+});
+
+test("GET /api/hit-metadata validates pagination and date bounds", async () => {
+  for (const query of [
+    "page=0",
+    "pageSize=1001",
+    "startDate=2026-02-30",
+    "startDate=2026-01-04&endDate=2026-01-03",
+  ]) {
+    const res = await fetch(`${server.baseUrl}/api/hit-metadata?${query}`);
+    assert.equal(res.status, 400, query);
+  }
 });
 
 test("POST /api/diary/:id/move-to-samples rejects labels outside the taxonomy", async () => {

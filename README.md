@@ -131,6 +131,13 @@ npm run server
 | `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |
 | `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
+| `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
+
+Bulk hit-metadata responses contain `items`, pagination fields including
+`hasNextPage`, `isLastPage`, and `complete`, plus `links.next`/`links.previous`.
+The same navigation links are advertised in the HTTP `Link` header. Date bounds
+use the linked diary recording's `YYYY-MM-DD` date; without bounds, orphaned
+metadata that has not yet acquired a diary row is included as well.
 
 `training-samples-index.json` in MinIO is regenerated after each mutation on
 a best-effort basis (the database is the source of truth, and

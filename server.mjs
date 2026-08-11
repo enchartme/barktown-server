@@ -48,7 +48,7 @@ import {
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
   listDiaryEntries, getDiaryEntry, deleteDiaryEntryRow,
-  upsertHitMetadata, getHitMetadata, deleteHitMetadataRow,
+  upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertSample,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
@@ -128,6 +128,31 @@ function validateHitMetadataPayload({ timestamps, confidences, loudnesses }) {
   return null;
 }
 
+const MAX_HIT_METADATA_PAGE_SIZE = 1000;
+
+/** Return true only for a real calendar date formatted as YYYY-MM-DD. */
+function isIsoDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+/** Parse a positive integer query field, returning null when invalid. */
+function parsePositiveInteger(value, defaultValue, max = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined) return defaultValue;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) return null;
+  return parsed;
+}
+
+/** Build a relative link while preserving the active date range and page size. */
+function hitMetadataPageLink({ startDate, endDate, page, pageSize }) {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
+  return `/api/hit-metadata?${params}`;
+}
+
 // Detection-tuning fields accepted by POST /api/diary/:id/reanalyze, and the
 // range each must fall within (mirrors reanalyze_clip.py's own argparse
 // bounds implicitly — the script doesn't clamp, so do it here).
@@ -167,6 +192,68 @@ app.get("/health", async () => ({ ok: true }));
 // List all diary entries, ordered by datetime (oldest first).
 app.get("/api/diary", async () => {
   return listDiaryEntries(db);
+});
+
+// Bulk hit metadata. Date bounds are inclusive and filter on diary_entries.date.
+// Rows without a linked diary entry are included only when no date bound is used.
+app.get("/api/hit-metadata", async (req, reply) => {
+  const { startDate, endDate } = req.query ?? {};
+  const page = parsePositiveInteger(req.query?.page, 1);
+  const pageSize = parsePositiveInteger(req.query?.pageSize, MAX_HIT_METADATA_PAGE_SIZE, MAX_HIT_METADATA_PAGE_SIZE);
+
+  if (startDate !== undefined && !isIsoDate(startDate)) {
+    reply.code(400);
+    return { error: "startDate must be a valid date in YYYY-MM-DD format" };
+  }
+  if (endDate !== undefined && !isIsoDate(endDate)) {
+    reply.code(400);
+    return { error: "endDate must be a valid date in YYYY-MM-DD format" };
+  }
+  if (startDate && endDate && startDate > endDate) {
+    reply.code(400);
+    return { error: "startDate must be earlier than or equal to endDate" };
+  }
+  if (page === null) {
+    reply.code(400);
+    return { error: "page must be a positive integer" };
+  }
+  if (pageSize === null) {
+    reply.code(400);
+    return { error: `pageSize must be an integer between 1 and ${MAX_HIT_METADATA_PAGE_SIZE}` };
+  }
+
+  const { items, totalRecords } = listHitMetadataPage(db, { startDate, endDate, page, pageSize });
+  const totalPages = Math.ceil(totalRecords / pageSize);
+  const hasNextPage = page * pageSize < totalRecords;
+  const hasPreviousPage = page > 1;
+  const linkParams = { startDate, endDate, pageSize };
+  const links = {
+    self: hitMetadataPageLink({ ...linkParams, page }),
+    next: hasNextPage ? hitMetadataPageLink({ ...linkParams, page: page + 1 }) : null,
+    previous: hasPreviousPage ? hitMetadataPageLink({ ...linkParams, page: page - 1 }) : null,
+  };
+
+  const linkHeader = [];
+  if (links.next) linkHeader.push(`<${links.next}>; rel="next"`);
+  if (links.previous) linkHeader.push(`<${links.previous}>; rel="prev"`);
+  if (linkHeader.length) reply.header("Link", linkHeader.join(", "));
+
+  return {
+    items,
+    pagination: {
+      page,
+      pageSize,
+      returnedRecords: items.length,
+      totalRecords,
+      totalPages,
+      hasNextPage,
+      hasPreviousPage,
+      nextPage: hasNextPage ? page + 1 : null,
+      isLastPage: !hasNextPage,
+      complete: !hasNextPage,
+    },
+    links,
+  };
 });
 
 // Get a single diary entry.
