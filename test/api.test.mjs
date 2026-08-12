@@ -46,6 +46,12 @@ before(async () => {
   });
   upsertHitMetadata(seedDb, "2026-01-02_13-14-15_false-positive", {
     timestamps: [1], confidences: [0.91], loudnesses: [1.1], paddingS: 1.5, windowS: 1.5,
+    modelTrainedAt: "2026-01-01T10:00:00Z",
+    analysisSettings: {
+      classifier: { model_sha256: "a".repeat(64), threshold: 0.42 },
+      monitor: { candidate_threshold: 0.92 },
+    },
+    analysisTrigger: "automatic",
   });
 
   for (const [day, second] of [["03", 2], ["04", 3]]) {
@@ -128,6 +134,10 @@ test("GET /api/hit-metadata paginates and advertises the next and final pages", 
   assert.equal(first.pagination.nextPage, 2);
   assert.match(first.links.next, /page=2/);
   assert.match(firstRes.headers.get("link") ?? "", /rel="next"/);
+  const seeded = first.items.find(item => item.clipId === "2026-01-02_13-14-15_false-positive");
+  assert.equal(seeded.modelTrainedAt, "2026-01-01T10:00:00Z");
+  assert.equal(seeded.analysisTrigger, "automatic");
+  assert.equal(seeded.analysisSettings.monitor.candidate_threshold, 0.92);
 
   const secondRes = await fetch(`${server.baseUrl}${first.links.next}`);
   assert.equal(secondRes.status, 200);
@@ -162,6 +172,50 @@ test("GET /api/hit-metadata validates pagination and date bounds", async () => {
   ]) {
     const res = await fetch(`${server.baseUrl}/api/hit-metadata?${query}`);
     assert.equal(res.status, 400, query);
+  }
+});
+
+test("POST /api/diary/:id/hit-metadata stores and exposes analysis provenance", async () => {
+  const payload = {
+    timestamps: [1.25],
+    confidences: [0.87],
+    loudnesses: [2.1],
+    padding_s: 1.5,
+    window_s: 1.5,
+    model_trained_at: "2026-08-12T15:32:07+02:00",
+    analysis_settings: {
+      classifier: { model_sha256: "b".repeat(64), threshold: 0.42 },
+      monitor: { candidate_threshold: 0.8 },
+    },
+    analysis_trigger: "manual",
+  };
+  const res = await fetch(`${server.baseUrl}/api/diary/provenance-test/hit-metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  assert.equal(res.status, 201);
+  const stored = await res.json();
+  assert.equal(stored.modelTrainedAt, payload.model_trained_at);
+  assert.deepEqual(stored.analysisSettings, payload.analysis_settings);
+  assert.equal(stored.analysisTrigger, "manual");
+});
+
+test("POST /api/diary/:id/hit-metadata validates provenance fields", async () => {
+  const base = { timestamps: [], confidences: [], loudnesses: [] };
+  for (const [field, value, expected] of [
+    ["model_trained_at", "2026-08-12T15:32:07", /timezone/],
+    ["analysis_settings", [], /JSON object/],
+    ["analysis_trigger", "scheduled", /automatic or manual/],
+  ]) {
+    const res = await fetch(`${server.baseUrl}/api/diary/invalid-provenance/hit-metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...base, [field]: value }),
+    });
+    assert.equal(res.status, 400, field);
+    assert.match((await res.json()).error, expected);
   }
 });
 

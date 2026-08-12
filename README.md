@@ -107,11 +107,9 @@ over the training-samples database. It runs as a separate process from
 `ingest-service.mjs` — SQLite's WAL mode plus a busy timeout (enabled in
 `lib/db.mjs`) safely support multiple writers/readers across processes.
 
-There is **no authentication**. This is meant to be reachable only over
-Tailscale (same trust model as barktown-goblin's own status API) — training
-samples are ephemeral and already backed up elsewhere, so the risk of
-open-LAN read/write access is accepted for now. Revisit this before adding
-mutating routes for the (non-ephemeral) diary recordings corpus.
+There is **no authentication**. This service is intended to be reachable only
+over the trusted Tailscale network, using the same trust boundary as
+barktown-goblin's status API.
 
 ```bash
 node server.mjs
@@ -132,12 +130,20 @@ npm run server
 | `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
 | `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
+| `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
+| `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
+| `POST /api/diary/:id/reanalyze` | Analyze the archived source WAV with Goblin and upsert a manually triggered result |
 
 Bulk hit-metadata responses contain `items`, pagination fields including
 `hasNextPage`, `isLastPage`, and `complete`, plus `links.next`/`links.previous`.
 The same navigation links are advertised in the HTTP `Link` header. Date bounds
 use the linked diary recording's `YYYY-MM-DD` date; without bounds, orphaned
 metadata that has not yet acquired a diary row is included as well.
+Each record also exposes `modelTrainedAt`, `analysisSettings`, and
+`analysisTrigger`. `analysisSettings` contains the classifier identity and the
+effective monitor-parameter snapshot used for that run. Existing records
+migrate with an unknown model timestamp, empty settings, and an `automatic`
+trigger.
 
 `training-samples-index.json` in MinIO is regenerated after each mutation on
 a best-effort basis (the database is the source of truth, and
@@ -147,6 +153,10 @@ a best-effort basis (the database is the source of truth, and
 |---|---|---|
 | `API_HOST` | `127.0.0.1` | Interface to bind |
 | `API_PORT` | `8090` | Port to listen on |
+| `REANALYZE_PYTHON_BIN` | `python3` | Python environment containing Goblin's inference dependencies |
+| `REANALYZE_SCRIPT_PATH` | sibling `barktown-goblin/tools/analyze_wav.py` | Goblin offline analyzer |
+| `REANALYZE_MODEL_DIR` | sibling `barktown-goblin/models` | Directory containing YAMNet and the classifier metadata pair |
+| `REANALYZE_TIMEOUT_MS` | `300000` | Maximum time for one synchronous re-analysis request |
 
 Deploy it the same way as the ingest service — copy `barktown-api.service` to
 `/etc/systemd/system/` and enable it:

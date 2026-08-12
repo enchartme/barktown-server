@@ -41,7 +41,7 @@ import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
-import { buildDiarySampleMove, archiveSourceKeyForEntry } from "./lib/diary-samples.mjs";
+import { buildDiarySampleMove, archiveSourceKeyCandidatesForEntry } from "./lib/diary-samples.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
 import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
@@ -105,10 +105,20 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
 
 /**
  * Validate a hit-metadata payload (own submissions from barktown-goblin, or
- * the JSON produced by tools/reanalyze_clip.py). Returns an error string, or
+ * the JSON produced by Goblin's tools/analyze_wav.py). Returns an error string, or
  * null if valid.
  */
-function validateHitMetadataPayload({ timestamps, confidences, loudnesses }) {
+function validateHitMetadataPayload(payload, { requireProvenance = false } = {}) {
+  const {
+    timestamps,
+    confidences,
+    loudnesses,
+    padding_s: paddingS,
+    window_s: windowS,
+    model_trained_at: modelTrainedAt,
+    analysis_settings: analysisSettings,
+    analysis_trigger: analysisTrigger,
+  } = payload ?? {};
   if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
     return "timestamps, confidences and loudnesses must be arrays";
   }
@@ -124,6 +134,59 @@ function validateHitMetadataPayload({ timestamps, confidences, loudnesses }) {
   }
   if (!loudnesses.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
     return "loudnesses must be non-negative finite numbers";
+  }
+  if (paddingS !== undefined && (typeof paddingS !== "number" || !Number.isFinite(paddingS) || paddingS < 0)) {
+    return "padding_s must be a non-negative finite number";
+  }
+  if (windowS !== undefined && (typeof windowS !== "number" || !Number.isFinite(windowS) || windowS <= 0)) {
+    return "window_s must be a positive finite number";
+  }
+  if (
+    modelTrainedAt !== undefined
+    && modelTrainedAt !== null
+    && (
+      typeof modelTrainedAt !== "string"
+      || !/(?:Z|[+-]\d{2}:\d{2})$/.test(modelTrainedAt)
+      || Number.isNaN(Date.parse(modelTrainedAt))
+    )
+  ) {
+    return "model_trained_at must be null or an ISO-8601 timestamp with a timezone";
+  }
+  if (
+    analysisSettings !== undefined
+    && (
+      analysisSettings === null
+      || typeof analysisSettings !== "object"
+      || Array.isArray(analysisSettings)
+    )
+  ) {
+    return "analysis_settings must be a JSON object";
+  }
+  if (
+    analysisTrigger !== undefined
+    && analysisTrigger !== "automatic"
+    && analysisTrigger !== "manual"
+  ) {
+    return "analysis_trigger must be automatic or manual";
+  }
+  if (requireProvenance) {
+    if (!Object.prototype.hasOwnProperty.call(payload, "model_trained_at")) {
+      return "model_trained_at is required from the offline analyzer";
+    }
+    if (
+      !analysisSettings
+      || typeof analysisSettings.classifier !== "object"
+      || analysisSettings.classifier === null
+      || Array.isArray(analysisSettings.classifier)
+      || typeof analysisSettings.monitor !== "object"
+      || analysisSettings.monitor === null
+      || Array.isArray(analysisSettings.monitor)
+    ) {
+      return "analysis_settings must contain classifier and monitor objects";
+    }
+    if (analysisTrigger !== "manual") {
+      return "analysis_trigger from the offline analyzer must be manual";
+    }
   }
   return null;
 }
@@ -154,13 +217,12 @@ function hitMetadataPageLink({ startDate, endDate, page, pageSize }) {
 }
 
 // Detection-tuning fields accepted by POST /api/diary/:id/reanalyze, and the
-// range each must fall within (mirrors reanalyze_clip.py's own argparse
-// bounds implicitly — the script doesn't clamp, so do it here).
+// range each must fall within (mirrors the monitor_params DB constraints).
 const REANALYZE_TUNING_FIELDS = {
   candidateThreshold: { min: 0, max: 1 },
   hitRefractoryS:     { min: 0 },
-  inferenceWindowS:   { min: 0 },
-  scoreIntervalS:     { min: 0 },
+  inferenceWindowS:   { min: 0.1 },
+  scoreIntervalS:     { min: 0.05 },
 };
 
 /** Validate optional detection-tuning overrides. Returns an error string, or null if valid. */
@@ -281,9 +343,19 @@ app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
 // The corresponding diary_entries row may not exist yet (ingest service is asynchronous),
 // so this is an upsert keyed on clip_id with no FK requirement.
 app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
-  const { timestamps, confidences, loudnesses, padding_s: paddingS, window_s: windowS } = req.body ?? {};
+  const payload = req.body ?? {};
+  const {
+    timestamps,
+    confidences,
+    loudnesses,
+    padding_s: paddingS,
+    window_s: windowS,
+    model_trained_at: modelTrainedAt,
+    analysis_settings: analysisSettings,
+    analysis_trigger: analysisTrigger,
+  } = payload;
 
-  const error = validateHitMetadataPayload({ timestamps, confidences, loudnesses });
+  const error = validateHitMetadataPayload(payload);
   if (error) {
     reply.code(400);
     return { error };
@@ -293,8 +365,11 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     timestamps,
     confidences,
     loudnesses,
-    paddingS: typeof paddingS === "number" && Number.isFinite(paddingS) ? paddingS : 0,
-    windowS:  typeof windowS  === "number" && Number.isFinite(windowS)  && windowS > 0 ? windowS : 1.5,
+    paddingS: paddingS ?? 0,
+    windowS: windowS ?? 1.5,
+    modelTrainedAt: modelTrainedAt ?? null,
+    analysisSettings: analysisSettings ?? {},
+    analysisTrigger: analysisTrigger ?? "automatic",
   });
   reply.code(201);
   return getHitMetadata(db, req.params.id);
@@ -324,7 +399,7 @@ app.patch("/api/monitor-params/:paramId", async (req, reply) => {
 });
 
 // Re-analyze a diary clip: re-score its archived, uncompressed source WAV
-// with YAMNet + the bark classifier (barktown-utils' tools/reanalyze_clip.py)
+// with YAMNet + the bark classifier (barktown-goblin's tools/analyze_wav.py)
 // and upsert the resulting hit-metadata. Synchronous — the client waits for
 // inference to finish (typically a few seconds per minute of audio).
 //
@@ -339,9 +414,9 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
     return { error: "not found" };
   }
 
-  let sourceKey;
+  let sourceKeys;
   try {
-    sourceKey = archiveSourceKeyForEntry(entry, CFG);
+    sourceKeys = archiveSourceKeyCandidatesForEntry(entry, CFG);
   } catch (e) {
     reply.code(400);
     return { error: e.message };
@@ -353,22 +428,39 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
     return { error: tuningError };
   }
   const monitorParams = getMonitorParamsMap(db);
-  const { candidateThreshold, hitRefractoryS, inferenceWindowS, scoreIntervalS } = req.body ?? {};
-  const tuning = {
-    candidateThreshold: candidateThreshold ?? monitorParams.candidate_threshold,
-    hitRefractoryS:     hitRefractoryS     ?? monitorParams.hit_refractory_s,
-    inferenceWindowS:   inferenceWindowS   ?? monitorParams.inference_window_s,
-    scoreIntervalS:     scoreIntervalS     ?? monitorParams.score_interval_s,
+  const effectiveMonitorSettings = { ...monitorParams };
+  const overrideFields = {
+    candidateThreshold: "candidate_threshold",
+    hitRefractoryS: "hit_refractory_s",
+    inferenceWindowS: "inference_window_s",
+    scoreIntervalS: "score_interval_s",
   };
+  for (const [bodyField, monitorField] of Object.entries(overrideFields)) {
+    if (req.body?.[bodyField] !== undefined) {
+      effectiveMonitorSettings[monitorField] = req.body[bodyField];
+    }
+  }
+  const tuning = { monitorSettings: effectiveMonitorSettings };
 
   const tmpPath = path.join(os.tmpdir(), `reanalyze-${entry.id}-${Date.now()}.wav`);
   try {
+    let sourceKey;
     try {
+      for (const candidate of sourceKeys) {
+        if (await statObjectIfExists(candidate)) {
+          sourceKey = candidate;
+          break;
+        }
+      }
+      if (!sourceKey) {
+        reply.code(502);
+        return { error: `archived source not found in MinIO; checked: ${sourceKeys.join(", ")}` };
+      }
       await download(mc, CFG.bucket, sourceKey, tmpPath);
     } catch (e) {
-      err(`reanalyze: could not download source "${sourceKey}" for ${entry.id}: ${e.message}`);
+      err(`reanalyze: could not locate/download source for ${entry.id}: ${e.message}`);
       reply.code(502);
-      return { error: `archived source not found in MinIO: ${sourceKey}` };
+      return { error: `could not read archived source from MinIO: ${e.message}` };
     }
 
     let payload;
@@ -380,9 +472,9 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
       return { error: `re-analysis failed: ${e.message}` };
     }
 
-    const validationError = validateHitMetadataPayload(payload);
+    const validationError = validateHitMetadataPayload(payload, { requireProvenance: true });
     if (validationError) {
-      err(`reanalyze: reanalyze_clip.py produced an invalid payload for ${entry.id}: ${validationError}`);
+      err(`reanalyze: analyze_wav.py produced an invalid payload for ${entry.id}: ${validationError}`);
       reply.code(502);
       return { error: `re-analysis produced an invalid payload: ${validationError}` };
     }
@@ -393,6 +485,9 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
       loudnesses: payload.loudnesses,
       paddingS: typeof payload.padding_s === "number" ? payload.padding_s : 0,
       windowS: typeof payload.window_s === "number" && payload.window_s > 0 ? payload.window_s : 1.5,
+      modelTrainedAt: payload.model_trained_at ?? null,
+      analysisSettings: payload.analysis_settings ?? {},
+      analysisTrigger: "manual",
     });
     log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
     reply.code(201);

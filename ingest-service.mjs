@@ -298,7 +298,12 @@ async function processFile(obj) {
     let processedAudio = tmpAudio;
     let waveformSource = tmpAudio; // waveform is always built from the pre-boost original
     let needsUpload = false; // true → upload local file; false → MinIO copyObject
+    let archiveFilename = null;
     if (filename.toLowerCase().endsWith(".wav")) {
+      // Archive under the same normalized stem used by the diary audio path.
+      // archiveSourceKeyForEntry() can then deterministically derive the WAV
+      // key even when the upload arrived with a short voice-recorder name.
+      archiveFilename = destFilename.replace(/\.wav$/i, ".wav");
       const mp3Filename = destFilename.replace(/\.wav$/i, ".mp3");
       const tmpMp3      = path.join(tmpDir, mp3Filename);
       const ok = convertWavToMp3(CFG.ffmpegBin, tmpAudio, tmpMp3, {
@@ -365,7 +370,7 @@ async function processFile(obj) {
     const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${destFilename}`;
     if (needsUpload) {
       await upload(mc, CFG.bucket, processedAudio, audioKey, "audio/mpeg");
-      const archiveKey = `${CFG.archivePrefix}${yyyy}/${mm}/${filename}`;
+      const archiveKey = `${CFG.archivePrefix}${yyyy}/${mm}/${archiveFilename}`;
       await copyObject(mc, CFG.bucket, objectKey, archiveKey);
       await removeObject(mc, CFG.bucket, objectKey);
       log(`  ⇒ audio   → ${audioKey}`);
@@ -508,4 +513,3 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
     process.exit(0);
   });
 }
-

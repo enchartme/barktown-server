@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildDiarySampleMove } from "../lib/diary-samples.mjs";
+import {
+  archiveSourceKeyCandidatesForEntry,
+  archiveSourceKeyForEntry,
+  buildDiarySampleMove,
+} from "../lib/diary-samples.mjs";
+import { parseShortFilename } from "../lib/filenames.mjs";
 import { SAMPLE_LABELS, SAMPLE_LABEL_COLORS } from "../lib/sample-labels.mjs";
 
 const cfg = {
@@ -44,5 +49,29 @@ test("buildDiarySampleMove rejects diary audio outside the managed prefix", () =
   assert.throws(
     () => buildDiarySampleMove({ ...entry, audioPath: "other/file.mp3" }, "wind", cfg),
     /below audio\//,
+  );
+});
+
+test("short recorder names map to a deterministic normalized archive key", () => {
+  const parsed = parseShortFilename("7 Jun at 21-54 barking.wav");
+  const normalizedEntry = {
+    audioPath: `audio/${parsed.date.slice(0, 4)}/06/${parsed.normalisedFilename.replace(/\.wav$/, ".mp3")}`,
+  };
+  assert.equal(
+    archiveSourceKeyForEntry(normalizedEntry, cfg),
+    `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/${parsed.normalisedFilename}`,
+  );
+  assert.deepEqual(
+    archiveSourceKeyCandidatesForEntry({
+      ...normalizedEntry,
+      datetimeLocal: parsed.datetimeLocal,
+      label: parsed.label,
+    }, cfg),
+    [
+      `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/${parsed.normalisedFilename}`,
+      `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/${parsed.normalisedFilename.replace(/\.wav$/, ".WAV")}`,
+      `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/7 Jun at 21-54 barking.wav`,
+      `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/7 Jun at 21-54 barking.WAV`,
+    ],
   );
 });
