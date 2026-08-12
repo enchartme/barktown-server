@@ -55,3 +55,28 @@ test("runReanalyzeScript passes one effective monitor settings snapshot", async 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("runReanalyzeScript kills analyzers that exceed output limits", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-reanalyze-output-test-"));
+  const scriptPath = path.join(tmpDir, "noisy-analyzer.mjs");
+  fs.writeFileSync(scriptPath, `process.stdout.write("x".repeat(1024));`);
+  const cfg = {
+    reanalyze: {
+      pythonBin: process.execPath,
+      scriptPath,
+      modelDir: "/models",
+      timeoutMs: 5000,
+      maxStdoutBytes: 32,
+      maxStderrBytes: 32,
+    },
+  };
+
+  try {
+    await assert.rejects(
+      runReanalyzeScript(cfg, "/archive/source.wav", { monitorSettings: {} }),
+      /stdout exceeded 32 bytes/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

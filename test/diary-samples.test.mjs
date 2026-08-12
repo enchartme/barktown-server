@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  availableSourceWavPath,
   archiveSourceKeyCandidatesForEntry,
   archiveSourceKeyForEntry,
   buildDiarySampleMove,
+  sourceWavKeyCandidatesForEntry,
 } from "../lib/diary-samples.mjs";
 import { parseShortFilename } from "../lib/filenames.mjs";
 import { SAMPLE_LABELS, SAMPLE_LABEL_COLORS } from "../lib/sample-labels.mjs";
@@ -74,4 +76,31 @@ test("short recorder names map to a deterministic normalized archive key", () =>
       `uncompressed-uploads-archive/${parsed.date.slice(0, 4)}/06/7 Jun at 21-54 barking.WAV`,
     ],
   );
+});
+
+test("source discovery supports explicit archives and linked training WAVs", () => {
+  const linked = {
+    ...entry,
+    sourceWavPath: "uncompressed-uploads-archive/2026/06/original.wav",
+    sampleAudioPath: "training-samples/bark/sample.wav",
+  };
+  const candidates = sourceWavKeyCandidatesForEntry(linked, cfg);
+  assert.deepEqual(candidates.slice(0, 2), [
+    linked.sourceWavPath,
+    linked.sampleAudioPath,
+  ]);
+  assert.equal(
+    availableSourceWavPath(linked, cfg, new Set([linked.sampleAudioPath])),
+    linked.sampleAudioPath,
+  );
+  assert.equal(availableSourceWavPath(linked, cfg, new Set()), null);
+});
+
+test("an explicit or linked source survives a malformed legacy audio path", () => {
+  const linked = {
+    ...entry,
+    audioPath: "outside-managed-audio/source.mp3",
+    sampleAudioPath: "training-samples/bark/sample.wav",
+  };
+  assert.deepEqual(sourceWavKeyCandidatesForEntry(linked, cfg), [linked.sampleAudioPath]);
 });

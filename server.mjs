@@ -39,10 +39,18 @@ import path from "path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
-import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload } from "./lib/minio.mjs";
+import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload, listObjects } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
-import { buildDiarySampleMove, archiveSourceKeyCandidatesForEntry } from "./lib/diary-samples.mjs";
+import {
+  availableSourceWavPath,
+  buildDiarySampleMove,
+  sourceWavKeyCandidatesForEntry,
+} from "./lib/diary-samples.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
+import {
+  createReanalysisLimiter,
+  ReanalysisAlreadyRunningError,
+} from "./lib/reanalysis-limiter.mjs";
 import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
@@ -58,6 +66,7 @@ import { generateWaveform } from "./lib/audio.mjs";
 const CFG = buildConfig();
 const db = openDb(CFG.dbPath);
 const mc = createClient(CFG.minio);
+const reanalysisLimiter = createReanalysisLimiter();
 
 const app = Fastify({ logger: false });
 // @fastify/cors defaults `methods` to "GET,HEAD,POST" — must list the
@@ -219,10 +228,10 @@ function hitMetadataPageLink({ startDate, endDate, page, pageSize }) {
 // Detection-tuning fields accepted by POST /api/diary/:id/reanalyze, and the
 // range each must fall within (mirrors the monitor_params DB constraints).
 const REANALYZE_TUNING_FIELDS = {
-  candidateThreshold: { min: 0, max: 1 },
-  hitRefractoryS:     { min: 0 },
-  inferenceWindowS:   { min: 0.1 },
-  scoreIntervalS:     { min: 0.05 },
+  candidateThreshold: { paramId: "candidate_threshold", min: 0, max: 1 },
+  hitRefractoryS:     { paramId: "hit_refractory_s", min: 0 },
+  inferenceWindowS:   { paramId: "inference_window_s", min: 0.1 },
+  scoreIntervalS:     { paramId: "score_interval_s", min: 0.05 },
 };
 
 /** Validate optional detection-tuning overrides. Returns an error string, or null if valid. */
@@ -248,12 +257,51 @@ async function statObjectIfExists(objectKey) {
   }
 }
 
+/** Resolve the first currently existing WAV source for one diary entry. */
+async function findSourceWav(entry) {
+  for (const candidate of sourceWavKeyCandidatesForEntry(entry, CFG)) {
+    const stat = await statObjectIfExists(candidate);
+    if (stat) return { objectKey: candidate, stat };
+  }
+  return null;
+}
+
+/** Add a live reanalyzable indication without exposing internal MinIO paths. */
+function publicDiaryEntry(entry, availableKeys) {
+  const sourcePath = availableSourceWavPath(entry, CFG, availableKeys);
+  const { sourceWavPath, sourceWavEtag, sampleAudioPath, ...publicEntry } = entry;
+  return { ...publicEntry, reanalyzable: sourcePath !== null };
+}
+
+/** List current WAV keys using two prefix scans rather than one stat per row. */
+async function listAvailableSourceWavKeys() {
+  const prefixes = [CFG.archivePrefix, CFG.samplesPrefix];
+  const results = await Promise.allSettled(
+    prefixes.map(prefix => listObjects(mc, CFG.bucket, prefix)),
+  );
+  const available = new Set();
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      for (const object of result.value) {
+        if (/\.wav$/i.test(object.name)) available.add(object.name);
+      }
+    } else {
+      warn(`could not list re-analysis sources below ${prefixes[index]}: ${result.reason?.message ?? result.reason}`);
+    }
+  });
+  return available;
+}
+
 app.get("/health", async () => ({ ok: true }));
 // ─── Diary entries ───────────────────────────────────────────────────────────────
 
 // List all diary entries, ordered by datetime (oldest first).
 app.get("/api/diary", async () => {
-  return listDiaryEntries(db);
+  const [entries, availableKeys] = await Promise.all([
+    Promise.resolve(listDiaryEntries(db)),
+    listAvailableSourceWavKeys(),
+  ]);
+  return entries.map(entry => publicDiaryEntry(entry, availableKeys));
 });
 
 // Bulk hit metadata. Date bounds are inclusive and filter on diary_entries.date.
@@ -325,7 +373,14 @@ app.get("/api/diary/:id", async (req, reply) => {
     reply.code(404);
     return { error: "not found" };
   }
-  return entry;
+  let source;
+  try {
+    source = await findSourceWav(entry);
+  } catch (e) {
+    warn(`could not inspect re-analysis source for ${entry.id}: ${e.message}`);
+  }
+  const available = new Set(source ? [source.objectKey] : []);
+  return publicDiaryEntry(entry, available);
 });
 
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).
@@ -406,20 +461,12 @@ app.patch("/api/monitor-params/:paramId", async (req, reply) => {
 // Detection tuning defaults come from the monitor_params DB table (the same
 // values barktown-goblin's live monitor uses); optional body fields override
 // them for this one run: candidateThreshold, hitRefractoryS,
-// inferenceWindowS, scoreIntervalS — all positive finite numbers.
+// inferenceWindowS, scoreIntervalS — all range-validated finite numbers.
 app.post("/api/diary/:id/reanalyze", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
     return { error: "not found" };
-  }
-
-  let sourceKeys;
-  try {
-    sourceKeys = archiveSourceKeyCandidatesForEntry(entry, CFG);
-  } catch (e) {
-    reply.code(400);
-    return { error: e.message };
   }
 
   const tuningError = validateReanalyzeTuning(req.body);
@@ -428,72 +475,77 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
     return { error: tuningError };
   }
   const monitorParams = getMonitorParamsMap(db);
-  const effectiveMonitorSettings = { ...monitorParams };
-  const overrideFields = {
-    candidateThreshold: "candidate_threshold",
-    hitRefractoryS: "hit_refractory_s",
-    inferenceWindowS: "inference_window_s",
-    scoreIntervalS: "score_interval_s",
-  };
-  for (const [bodyField, monitorField] of Object.entries(overrideFields)) {
-    if (req.body?.[bodyField] !== undefined) {
-      effectiveMonitorSettings[monitorField] = req.body[bodyField];
-    }
+  const effectiveMonitorSettings = {};
+  for (const [bodyField, { paramId }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+    effectiveMonitorSettings[paramId] = req.body?.[bodyField] ?? monitorParams[paramId];
   }
   const tuning = { monitorSettings: effectiveMonitorSettings };
 
-  const tmpPath = path.join(os.tmpdir(), `reanalyze-${entry.id}-${Date.now()}.wav`);
   try {
-    let sourceKey;
-    try {
-      for (const candidate of sourceKeys) {
-        if (await statObjectIfExists(candidate)) {
-          sourceKey = candidate;
-          break;
-        }
-      }
-      if (!sourceKey) {
+    return await reanalysisLimiter.run(entry.id, async () => {
+      let source;
+      try {
+        source = await findSourceWav(entry);
+      } catch (e) {
+        err(`reanalyze: could not inspect source for ${entry.id}: ${e.message}`);
         reply.code(502);
-        return { error: `archived source not found in MinIO; checked: ${sourceKeys.join(", ")}` };
+        return { error: `could not inspect archived source in MinIO: ${e.message}` };
       }
-      await download(mc, CFG.bucket, sourceKey, tmpPath);
-    } catch (e) {
-      err(`reanalyze: could not locate/download source for ${entry.id}: ${e.message}`);
-      reply.code(502);
-      return { error: `could not read archived source from MinIO: ${e.message}` };
-    }
+      if (!source) {
+        reply.code(409);
+        return { error: "this diary entry has no currently available source WAV" };
+      }
 
-    let payload;
-    try {
-      payload = await runReanalyzeScript(CFG, tmpPath, tuning);
-    } catch (e) {
-      err(`reanalyze: scoring failed for ${entry.id}: ${e.message}`);
-      reply.code(502);
-      return { error: `re-analysis failed: ${e.message}` };
-    }
+      const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "barktown-reanalyze-"));
+      const tmpPath = path.join(tmpDir, "source.wav");
+      try {
+        try {
+          await download(mc, CFG.bucket, source.objectKey, tmpPath);
+        } catch (e) {
+          err(`reanalyze: could not download source "${source.objectKey}" for ${entry.id}: ${e.message}`);
+          reply.code(502);
+          return { error: `could not read archived source from MinIO: ${e.message}` };
+        }
 
-    const validationError = validateHitMetadataPayload(payload, { requireProvenance: true });
-    if (validationError) {
-      err(`reanalyze: analyze_wav.py produced an invalid payload for ${entry.id}: ${validationError}`);
-      reply.code(502);
-      return { error: `re-analysis produced an invalid payload: ${validationError}` };
-    }
+        let payload;
+        try {
+          payload = await runReanalyzeScript(CFG, tmpPath, tuning);
+        } catch (e) {
+          err(`reanalyze: scoring failed for ${entry.id}: ${e.message}`);
+          reply.code(502);
+          return { error: `re-analysis failed: ${e.message}` };
+        }
 
-    upsertHitMetadata(db, entry.id, {
-      timestamps: payload.timestamps,
-      confidences: payload.confidences,
-      loudnesses: payload.loudnesses,
-      paddingS: typeof payload.padding_s === "number" ? payload.padding_s : 0,
-      windowS: typeof payload.window_s === "number" && payload.window_s > 0 ? payload.window_s : 1.5,
-      modelTrainedAt: payload.model_trained_at ?? null,
-      analysisSettings: payload.analysis_settings ?? {},
-      analysisTrigger: "manual",
+        const validationError = validateHitMetadataPayload(payload, { requireProvenance: true });
+        if (validationError) {
+          err(`reanalyze: analyze_wav.py produced an invalid payload for ${entry.id}: ${validationError}`);
+          reply.code(502);
+          return { error: `re-analysis produced an invalid payload: ${validationError}` };
+        }
+
+        upsertHitMetadata(db, entry.id, {
+          timestamps: payload.timestamps,
+          confidences: payload.confidences,
+          loudnesses: payload.loudnesses,
+          paddingS: typeof payload.padding_s === "number" ? payload.padding_s : 0,
+          windowS: typeof payload.window_s === "number" && payload.window_s > 0 ? payload.window_s : 1.5,
+          modelTrainedAt: payload.model_trained_at ?? null,
+          analysisSettings: payload.analysis_settings ?? {},
+          analysisTrigger: "manual",
+        });
+        log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
+        reply.code(201);
+        return getHitMetadata(db, entry.id);
+      } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+      }
     });
-    log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
-    reply.code(201);
-    return getHitMetadata(db, entry.id);
-  } finally {
-    fs.rm(tmpPath, { force: true }, () => {});
+  } catch (e) {
+    if (e instanceof ReanalysisAlreadyRunningError) {
+      reply.code(409);
+      return { error: e.message };
+    }
+    throw e;
   }
 });
 

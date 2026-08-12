@@ -299,6 +299,8 @@ async function processFile(obj) {
     let waveformSource = tmpAudio; // waveform is always built from the pre-boost original
     let needsUpload = false; // true → upload local file; false → MinIO copyObject
     let archiveFilename = null;
+    let sourceWavPath = null;
+    let sourceWavEtag = null;
     if (filename.toLowerCase().endsWith(".wav")) {
       // Archive under the same normalized stem used by the diary audio path.
       // archiveSourceKeyForEntry() can then deterministically derive the WAV
@@ -372,6 +374,8 @@ async function processFile(obj) {
       await upload(mc, CFG.bucket, processedAudio, audioKey, "audio/mpeg");
       const archiveKey = `${CFG.archivePrefix}${yyyy}/${mm}/${archiveFilename}`;
       await copyObject(mc, CFG.bucket, objectKey, archiveKey);
+      sourceWavPath = archiveKey;
+      sourceWavEtag = obj.etag ?? null;
       await removeObject(mc, CFG.bucket, objectKey);
       log(`  ⇒ audio   → ${audioKey}`);
       log(`  ⇒ archive → ${archiveKey}`);
@@ -389,6 +393,8 @@ async function processFile(obj) {
       date, time, datetimeLocal, label,
       durationSec: parseFloat(durationSec.toFixed(3)),
       kind,
+      sourceWavPath,
+      sourceWavEtag,
     };
 
     // Upsert into SQLite diary_entries (source of truth).

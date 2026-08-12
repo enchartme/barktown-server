@@ -120,6 +120,8 @@ npm run server
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Liveness check |
+| `GET /api/diary` | List diary entries with a live `reanalyzable` indication |
+| `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
@@ -132,7 +134,7 @@ npm run server
 | `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
 | `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
-| `POST /api/diary/:id/reanalyze` | Analyze the archived source WAV with Goblin and upsert a manually triggered result |
+| `POST /api/diary/:id/reanalyze` | Deterministically reclassify the available source WAV with Goblin and upsert a manually triggered result |
 
 Bulk hit-metadata responses contain `items`, pagination fields including
 `hasNextPage`, `isLastPage`, and `complete`, plus `links.next`/`links.previous`.
@@ -141,9 +143,27 @@ use the linked diary recording's `YYYY-MM-DD` date; without bounds, orphaned
 metadata that has not yet acquired a diary row is included as well.
 Each record also exposes `modelTrainedAt`, `analysisSettings`, and
 `analysisTrigger`. `analysisSettings` contains the classifier identity and the
-effective monitor-parameter snapshot used for that run. Existing records
+settings actually applied during that run. Existing records
 migrate with an unknown model timestamp, empty settings, and an `automatic`
 trigger.
+
+Diary responses include a live `reanalyzable` boolean. It is true only when a
+source WAV currently exists in MinIO: either the diary entry's archived WAV or
+a WAV belonging to its linked training sample. New WAV ingests retain the
+archive path and ETag in SQLite; legacy normalized archive-name candidates are
+also checked. If a source is later cleaned from disk, the next diary response
+turns the indication off and the client disables the re-analysis button.
+
+Manual re-analysis is deterministic window reclassification, not replay of
+Goblin's callback-aligned live event state machine. It applies and records only
+`candidate_threshold`, `hit_refractory_s`, `inference_window_s`, and
+`score_interval_s`. Confirmation, silence-gap, cooldown, and event assembly do
+not participate.
+
+The API permits one re-analysis operation at a time. Different records wait in
+FIFO order; another request for a record that is already queued or running
+returns `409`. Each operation uses a unique temporary directory, and analyzer
+stdout/stderr are capped as well as timed out.
 
 `training-samples-index.json` in MinIO is regenerated after each mutation on
 a best-effort basis (the database is the source of truth, and
@@ -157,6 +177,8 @@ a best-effort basis (the database is the source of truth, and
 | `REANALYZE_SCRIPT_PATH` | sibling `barktown-goblin/tools/analyze_wav.py` | Goblin offline analyzer |
 | `REANALYZE_MODEL_DIR` | sibling `barktown-goblin/models` | Directory containing YAMNet and the classifier metadata pair |
 | `REANALYZE_TIMEOUT_MS` | `300000` | Maximum time for one synchronous re-analysis request |
+| `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Kill an analyzer whose JSON/stdout exceeds this size |
+| `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
 
 Deploy it the same way as the ingest service — copy `barktown-api.service` to
 `/etc/systemd/system/` and enable it:
