@@ -165,6 +165,10 @@ FIFO order; another request for a record that is already queued or running
 returns `409`. Each operation uses a unique temporary directory, and analyzer
 stdout/stderr are capped as well as timed out.
 
+For the server-side Python environment, TFLite runtime, model bundle, systemd
+wiring, and smoke-test procedure, follow Goblin's
+[Setup as barktown-api analyzer](https://github.com/enchartme/barktown-goblin#setup-as-barktown-api-analyzer).
+
 `training-samples-index.json` in MinIO is regenerated after each mutation on
 a best-effort basis (the database is the source of truth, and
 `ingest-service.mjs` regenerates it anyway on every new upload).
