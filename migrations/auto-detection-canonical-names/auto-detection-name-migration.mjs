@@ -302,6 +302,34 @@ export function canonicalizeManagedObjectKey(key, cfg) {
   return key;
 }
 
+/**
+ * Classify legacy managed objects that were not reached through a diary row.
+ * Archived WAVs are durable source recordings and can be renamed directly
+ * from their exact legacy filename. Unrepresented derived audio/waveforms
+ * remain blocking because their missing DB association needs investigation.
+ */
+export function classifyUnplannedLegacyObjects(managedObjects, plannedSourceKeys, cfg) {
+  const standaloneArchiveMoves = [];
+  const blockingKeys = [];
+  for (const object of managedObjects) {
+    const sourceKey = object.name;
+    const targetKey = canonicalizeManagedObjectKey(sourceKey, cfg);
+    if (targetKey === sourceKey || plannedSourceKeys.has(sourceKey)) continue;
+
+    if (sourceKey.startsWith(cfg.archivePrefix) && /\.wav$/i.test(sourceKey)) {
+      standaloneArchiveMoves.push({
+        kind: "source-wav-standalone",
+        sourceKey,
+        targetKey,
+        source: object,
+      });
+    } else {
+      blockingKeys.push(sourceKey);
+    }
+  }
+  return { standaloneArchiveMoves, blockingKeys };
+}
+
 function replaceBasename(value, basename) {
   return path.posix.join(path.posix.dirname(value), basename);
 }

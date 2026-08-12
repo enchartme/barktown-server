@@ -10,6 +10,7 @@ import {
   buildIdentityMapping,
   buildMigratedDiaryIndex,
   canonicalizeManagedObjectKey,
+  classifyUnplannedLegacyObjects,
   migrateDatabase,
   resolveSourceWavMapping,
   validateMigrationPlan,
@@ -188,4 +189,34 @@ test("canonicalizes managed audio, archive, and waveform object keys", () => {
   );
   const freeform = "audio/2026/08/2026-08-02 13-54-38 note C1 D17 W98.mp3";
   assert.equal(canonicalizeManagedObjectKey(freeform, cfg), freeform);
+});
+
+test("plans standalone archive WAVs but blocks unrepresented derived objects", () => {
+  const cfg = {
+    audioPrefix: "audio/",
+    archivePrefix: "uncompressed-uploads-archive/",
+    waveformPrefix: "waveforms/",
+  };
+  const archive = {
+    name: "uncompressed-uploads-archive/2026/08/2026-08-06 20-31-46 -A- C1 D5 W9 La16.9 Lm7.1.wav",
+    size: 123,
+  };
+  const derivedAudio = {
+    name: "audio/2026/08/2026-08-06 20-31-46 -A- C1 D5 W9 La16.9 Lm7.1.mp3",
+    size: 45,
+  };
+
+  const classified = classifyUnplannedLegacyObjects(
+    [archive, derivedAudio],
+    new Set(),
+    cfg,
+  );
+
+  assert.deepEqual(classified.standaloneArchiveMoves, [{
+    kind: "source-wav-standalone",
+    sourceKey: archive.name,
+    targetKey: "uncompressed-uploads-archive/2026/08/2026-08-06 20-31-46 -A-.wav",
+    source: archive,
+  }]);
+  assert.deepEqual(classified.blockingKeys, [derivedAudio.name]);
 });

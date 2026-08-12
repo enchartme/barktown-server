@@ -17,7 +17,9 @@ Example:
 The operation updates:
 
 - MinIO objects below `uncompressed-uploads-archive/`, `audio/`, and
-  `waveforms/`, using staged copies before old keys are removed.
+  `waveforms/`, using staged copies before old keys are removed. Exact legacy
+  archive WAVs are included even when their original diary row was moved or
+  deleted and no longer references them.
 - `diary_entries.id`, `filename`, `audio_path`, `waveform_path`, `label`, and
   `source_wav_path`.
 - `samples.diary_id`, including an orphan legacy reference if one exists.
@@ -27,8 +29,10 @@ The operation updates:
 ## Safeguards
 
 The runner is a dry run unless `--apply` is supplied. Preflight rejects missing
-objects, unexpected stats-named objects, target collisions, inconsistent DB
-paths, split identity collisions, and a previously completed run. Apply mode
+objects, unrepresented derived `audio/` or `waveforms/` objects, target
+collisions, inconsistent DB paths, split identity collisions, and a previously
+completed run. A standalone archive WAV is safe to include because its exact
+legacy name deterministically yields the canonical archive name. Apply mode
 also refuses to start while `barktown-ingest` or `barktown-api` is active.
 
 Before mutation, it creates a consistent SQLite binary backup plus SQL/JSON

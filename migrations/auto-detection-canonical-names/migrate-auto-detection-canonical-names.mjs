@@ -37,6 +37,7 @@ import {
   buildIdentityMapping,
   buildMigratedDiaryIndex,
   canonicalizeManagedObjectKey,
+  classifyUnplannedLegacyObjects,
   diaryMappingHasChanges,
   migrateDatabase,
   resolveSourceWavMapping,
@@ -242,14 +243,25 @@ function preflightObjects(diaryMappings, managedObjects) {
     }
   }
 
-  const expectedLegacyKeys = new Set(pairs.map(pair => pair.sourceKey));
-  const unexpectedLegacy = managedObjects
-    .map(object => object.name)
-    .filter(key => canonicalizeManagedObjectKey(key, CFG) !== key && !expectedLegacyKeys.has(key));
-  if (unexpectedLegacy.length > 0) {
-    throw new Error(`legacy stats-named MinIO objects are not represented by the migration plan:\n${unexpectedLegacy.join("\n")}`);
+  const plannedSourceKeys = new Set(pairs.map(pair => pair.sourceKey));
+  const { standaloneArchiveMoves, blockingKeys } = classifyUnplannedLegacyObjects(
+    managedObjects,
+    plannedSourceKeys,
+    CFG,
+  );
+  pairs.push(...standaloneArchiveMoves);
+  if (blockingKeys.length > 0) {
+    throw new Error(`derived legacy MinIO objects are not represented by the database migration plan:\n${blockingKeys.join("\n")}`);
   }
 
+  const targetSources = new Map();
+  for (const pair of pairs) {
+    const previousSource = targetSources.get(pair.targetKey);
+    if (previousSource && previousSource !== pair.sourceKey) {
+      throw new Error(`multiple legacy objects collapse to target ${pair.targetKey}: ${previousSource}, ${pair.sourceKey}`);
+    }
+    targetSources.set(pair.targetKey, pair.sourceKey);
+  }
   const sourceKeys = new Set(pairs.map(pair => pair.sourceKey));
   for (const pair of pairs) {
     if (objectsByName.has(pair.targetKey) && !sourceKeys.has(pair.targetKey)) {
@@ -261,7 +273,7 @@ function preflightObjects(diaryMappings, managedObjects) {
     prefix,
     pairs.filter(pair => pair.sourceKey.startsWith(prefix)).length,
   ]));
-  return { moves: pairs, counts };
+  return { moves: pairs, counts, standaloneArchiveCount: standaloneArchiveMoves.length };
 }
 
 function printPlan({
@@ -283,6 +295,7 @@ function printPlan({
   log(`  hit metadata   : ${hitMetadataCount}`);
   log(`  index rows     : ${oldIndexCount} -> ${newIndexCount}`);
   log(`  archive WAVs   : ${preflight.counts[CFG.archivePrefix]}`);
+  log(`    standalone   : ${preflight.standaloneArchiveCount}`);
   log(`  audio objects  : ${preflight.counts[CFG.audioPrefix]}`);
   log(`  waveforms      : ${preflight.counts[CFG.waveformPrefix]}`);
   const examples = diaryMappings.length <= 2 ? diaryMappings : [diaryMappings[0], diaryMappings.at(-1)];
