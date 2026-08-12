@@ -55,7 +55,7 @@ import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
-  listDiaryEntries, getDiaryEntry, deleteDiaryEntryRow,
+  listDiaryEntries, getLatestDiaryDate, getDiaryEntry, deleteDiaryEntryRow,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertSample,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
@@ -308,6 +308,9 @@ async function listAvailableSourceWavKeys() {
 
 app.get("/health", async () => ({ ok: true }));
 // ─── Diary entries ───────────────────────────────────────────────────────────────
+
+// Lightweight bootstrap for date-bounded clients such as the report view.
+app.get("/api/diary/latest-date", async () => ({ date: getLatestDiaryDate(db) }));
 
 // List diary entries, ordered by datetime (oldest first). Date bounds are inclusive.
 app.get("/api/diary", async (req, reply) => {

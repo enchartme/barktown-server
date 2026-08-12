@@ -128,6 +128,12 @@ test("GET /api/diary filters inclusively by diary date", async () => {
   assert.deepEqual(entries.map(entry => entry.date), ["2026-01-03", "2026-01-04"]);
 });
 
+test("GET /api/diary/latest-date returns only the newest available date", async () => {
+  const res = await fetch(`${server.baseUrl}/api/diary/latest-date`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { date: "2026-01-04" });
+});
+
 test("GET /api/diary validates date bounds", async () => {
   for (const query of [
     "startDate=2026-02-30",
