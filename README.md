@@ -163,10 +163,34 @@ Goblin's callback-aligned live event state machine. It applies and records only
 `score_interval_s`. Confirmation, silence-gap, cooldown, and event assembly do
 not participate.
 
-The API permits one re-analysis operation at a time. Different records wait in
-FIFO order; another request for a record that is already queued or running
-returns `409`. Each operation uses a unique temporary directory, and analyzer
-stdout/stderr are capped as well as timed out.
+The API permits four re-analysis operations at a time by default. Additional
+records wait in FIFO order; another request for a record that is already queued
+or running returns `409`. Each operation uses a unique temporary directory, and
+analyzer stdout/stderr are capped as well as timed out.
+
+### Bulk re-analysis by date
+
+Run the server-local CLI with exactly one real calendar date. It loads the
+current diary, selects only entries on that date whose source WAV is currently
+available, and submits them through a bounded worker pool:
+
+```bash
+cd ~/git/enchartme/barktown-ingest
+npm run bulk-reanalyze -- 2026-08-12
+```
+
+The required `YYYY-MM-DD` argument deliberately limits each invocation to one
+day. The CLI prints a `START` line as each worker takes a record, an `OK` or
+`FAIL` line as it completes, and a final succeeded/failed/unavailable summary.
+A failed recording does not stop the rest of the date. Entries without a
+discoverable archive or linked training WAV are counted as unavailable and are
+not submitted.
+
+The CLI connects to `http://127.0.0.1:$API_PORT` and uses the same
+`REANALYZE_CONCURRENCY` value as the API. Set `BULK_REANALYZE_API_URL` only when
+the API is at another address. Changing `REANALYZE_CONCURRENCY` requires a
+`barktown-api` restart; on the four-CPU server the default of four gives one
+Python analyzer process per worker.
 
 For the server-side Python environment, TFLite runtime, model bundle, systemd
 wiring, and smoke-test procedure, follow Goblin's
@@ -186,6 +210,8 @@ a best-effort basis (the database is the source of truth, and
 | `REANALYZE_TIMEOUT_MS` | `300000` | Maximum time for one synchronous re-analysis request |
 | `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Kill an analyzer whose JSON/stdout exceeds this size |
 | `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
+| `REANALYZE_CONCURRENCY` | `4` | Maximum concurrent analyzer processes; also used by the bulk CLI worker pool |
+| `BULK_REANALYZE_API_URL` | `http://127.0.0.1:$API_PORT` | API base URL used only by `npm run bulk-reanalyze` |
 
 Deploy it the same way as the ingest service — copy `barktown-api.service` to
 `/etc/systemd/system/` and enable it:

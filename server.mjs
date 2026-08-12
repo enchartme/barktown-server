@@ -66,7 +66,7 @@ import { generateWaveform } from "./lib/audio.mjs";
 const CFG = buildConfig();
 const db = openDb(CFG.dbPath);
 const mc = createClient(CFG.minio);
-const reanalysisLimiter = createReanalysisLimiter();
+const reanalysisLimiter = createReanalysisLimiter({ concurrency: CFG.reanalyze.concurrency });
 
 const app = Fastify({ logger: false });
 // @fastify/cors defaults `methods` to "GET,HEAD,POST" — must list the
@@ -961,6 +961,7 @@ try {
   await app.listen({ port, host });
   log(`barktown-api listening on http://${host}:${port}`);
   log(`  db: ${CFG.dbPath}`);
+  log(`  re-analysis workers: ${CFG.reanalyze.concurrency}`);
 } catch (e) {
   err(e);
   process.exit(1);
