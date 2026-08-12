@@ -202,6 +202,21 @@ test("POST /api/diary/:id/hit-metadata stores and exposes analysis provenance", 
   assert.equal(stored.analysisTrigger, "manual");
 });
 
+test("POST /api/diary/:id/hit-metadata canonicalizes legacy stats IDs", async () => {
+  const legacyId = "2026-08-01_11-08-24_-A-_C1_D11_W9_La1_4_Lm1_2";
+  const canonicalId = "2026-08-01_11-08-24_-A-";
+  const res = await fetch(`${server.baseUrl}/api/diary/${legacyId}/hit-metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ timestamps: [1], confidences: [1], loudnesses: [1.4] }),
+  });
+
+  assert.equal(res.status, 201);
+  assert.equal((await res.json()).clipId, canonicalId);
+  assert.equal((await fetch(`${server.baseUrl}/api/diary/${legacyId}/hit-metadata`)).status, 404);
+  assert.equal((await fetch(`${server.baseUrl}/api/diary/${canonicalId}/hit-metadata`)).status, 200);
+});
+
 test("POST /api/diary/:id/hit-metadata validates provenance fields", async () => {
   const base = { timestamps: [], confidences: [], loudnesses: [] };
   for (const [field, value, expected] of [

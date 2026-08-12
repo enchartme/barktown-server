@@ -18,7 +18,8 @@
     "compare-index-with-list": "node compare-index-with-list.mjs",
     "check-sizes": "node check-sizes.mjs",
     "observe": "journalctl -u barktown-ingest -f",
-    "test": "node --test test/*.test.mjs"
+    "migrate-auto-detection-names": "node migrations/auto-detection-canonical-names/migrate-auto-detection-canonical-names.mjs",
+    "test": "node --test test/*.test.mjs migrations/auto-detection-canonical-names/*.test.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

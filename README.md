@@ -96,7 +96,10 @@ This is idempotent — safe to re-run any time. `training-samples-index.json`
 in the bucket continues to be regenerated from the database on every
 update, so the existing barktown client keeps working unchanged.
 
-Completed one-time operations and their tests are retained under `archive/`.
+Pending guarded one-time operations live under `migrations/`; completed
+operations and their tests are retained under `archive/`. The current
+auto-detection canonical-name migration is documented in
+`migrations/auto-detection-canonical-names/README.md`.
 
 ---
 
@@ -316,6 +319,14 @@ minio-client rm local/barktown/upload-here/"2026-01-17 15-42-00 bad name.m4a"
 ```
 YYYY-MM-DD HH-MM-SS optional comment.m4a
 YYYY-MM-DD HH-MM-SS optional comment.aac
+```
+
+Automatically detected clips use the stable marker-only form below. Detection
+confidence, density, hit count, and loudness are stored in `hit_metadata` and
+must not be embedded in filenames or IDs.
+
+```text
+YYYY-MM-DD HH-MM-SS -A-.wav
 ```
 
 - No trailing space before `.ext`

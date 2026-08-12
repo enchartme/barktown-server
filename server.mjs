@@ -40,7 +40,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload, listObjects } from "./lib/minio.mjs";
-import { parseSampleFilename } from "./lib/filenames.mjs";
+import { canonicalizeAutoDetectionId, parseSampleFilename } from "./lib/filenames.mjs";
 import {
   availableSourceWavPath,
   buildDiarySampleMove,
@@ -416,7 +416,11 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     return { error };
   }
 
-  upsertHitMetadata(db, req.params.id, {
+  // Older Goblin versions derived this ID from filenames containing the
+  // mutable C/D/W/La/Lm snapshot. Normalize at the API boundary so a rolling
+  // deployment cannot reintroduce split identities after the migration.
+  const clipId = canonicalizeAutoDetectionId(req.params.id);
+  upsertHitMetadata(db, clipId, {
     timestamps,
     confidences,
     loudnesses,
@@ -427,7 +431,7 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     analysisTrigger: analysisTrigger ?? "automatic",
   });
   reply.code(201);
-  return getHitMetadata(db, req.params.id);
+  return getHitMetadata(db, clipId);
 });
 
 // ─── Monitor params (single source of truth for barktown-goblin's bark-monitor

@@ -56,7 +56,12 @@ import {
   loadJson, saveJson,
 } from "./lib/minio.mjs";
 import { getDuration, convertToWav, convertWavToMp3, generateWaveform } from "./lib/audio.mjs";
-import { parseFilename, parseShortFilename, parseSampleFilename } from "./lib/filenames.mjs";
+import {
+  canonicalizeAutoDetectionFilename,
+  parseFilename,
+  parseShortFilename,
+  parseSampleFilename,
+} from "./lib/filenames.mjs";
 import { openDb, upsertSample, exportSamplesIndexJson, upsertDiaryEntry } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
@@ -273,6 +278,17 @@ async function processFile(obj) {
       destFilename = normalisedFilename;
       log(`  ↻ normalised filename: "${filename}" → "${destFilename}"`);
     }
+  }
+
+  // Accept uploads from an older Goblin during a rolling deployment, but do
+  // not let its mutable C/D/W/La/Lm snapshot become a durable object name or
+  // diary identity. The API route applies the equivalent normalization to
+  // hit-metadata IDs sent by that older client.
+  const canonicalFilename = canonicalizeAutoDetectionFilename(destFilename);
+  if (canonicalFilename !== destFilename) {
+    log(`  ↻ canonical auto-detection filename: "${destFilename}" → "${canonicalFilename}"`);
+    destFilename = canonicalFilename;
+    parsed = parseFilename(destFilename);
   }
 
   if (!parsed) {
