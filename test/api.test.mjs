@@ -121,6 +121,24 @@ test("GET /api/samples/:id returns 404 for an unknown id", async () => {
   assert.equal(res.status, 404);
 });
 
+test("GET /api/diary filters inclusively by diary date", async () => {
+  const res = await fetch(`${server.baseUrl}/api/diary?startDate=2026-01-03&endDate=2026-01-04`);
+  assert.equal(res.status, 200);
+  const entries = await res.json();
+  assert.deepEqual(entries.map(entry => entry.date), ["2026-01-03", "2026-01-04"]);
+});
+
+test("GET /api/diary validates date bounds", async () => {
+  for (const query of [
+    "startDate=2026-02-30",
+    "endDate=not-a-date",
+    "startDate=2026-01-04&endDate=2026-01-03",
+  ]) {
+    const res = await fetch(`${server.baseUrl}/api/diary?${query}`);
+    assert.equal(res.status, 400, query);
+  }
+});
+
 test("GET /api/hit-metadata paginates and advertises the next and final pages", async () => {
   const firstRes = await fetch(`${server.baseUrl}/api/hit-metadata?page=1&pageSize=2`);
   assert.equal(firstRes.status, 200);

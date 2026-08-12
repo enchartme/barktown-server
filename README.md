@@ -123,7 +123,7 @@ npm run server
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Liveness check |
-| `GET /api/diary` | List diary entries with a live `reanalyzable` indication |
+| `GET /api/diary` | List diary entries with a live `reanalyzable` indication; optionally filter inclusively with `startDate`/`endDate` |
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |

@@ -209,6 +209,20 @@ function isIsoDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+/** Validate optional inclusive date bounds shared by list endpoints. */
+function dateBoundsError(startDate, endDate) {
+  if (startDate !== undefined && !isIsoDate(startDate)) {
+    return "startDate must be a valid date in YYYY-MM-DD format";
+  }
+  if (endDate !== undefined && !isIsoDate(endDate)) {
+    return "endDate must be a valid date in YYYY-MM-DD format";
+  }
+  if (startDate && endDate && startDate > endDate) {
+    return "startDate must be earlier than or equal to endDate";
+  }
+  return null;
+}
+
 /** Parse a positive integer query field, returning null when invalid. */
 function parsePositiveInteger(value, defaultValue, max = Number.MAX_SAFE_INTEGER) {
   if (value === undefined) return defaultValue;
@@ -295,10 +309,17 @@ async function listAvailableSourceWavKeys() {
 app.get("/health", async () => ({ ok: true }));
 // ─── Diary entries ───────────────────────────────────────────────────────────────
 
-// List all diary entries, ordered by datetime (oldest first).
-app.get("/api/diary", async () => {
+// List diary entries, ordered by datetime (oldest first). Date bounds are inclusive.
+app.get("/api/diary", async (req, reply) => {
+  const { startDate, endDate } = req.query ?? {};
+  const boundsError = dateBoundsError(startDate, endDate);
+  if (boundsError) {
+    reply.code(400);
+    return { error: boundsError };
+  }
+
   const [entries, availableKeys] = await Promise.all([
-    Promise.resolve(listDiaryEntries(db)),
+    Promise.resolve(listDiaryEntries(db, { startDate, endDate })),
     listAvailableSourceWavKeys(),
   ]);
   return entries.map(entry => publicDiaryEntry(entry, availableKeys));
@@ -311,17 +332,10 @@ app.get("/api/hit-metadata", async (req, reply) => {
   const page = parsePositiveInteger(req.query?.page, 1);
   const pageSize = parsePositiveInteger(req.query?.pageSize, MAX_HIT_METADATA_PAGE_SIZE, MAX_HIT_METADATA_PAGE_SIZE);
 
-  if (startDate !== undefined && !isIsoDate(startDate)) {
+  const boundsError = dateBoundsError(startDate, endDate);
+  if (boundsError) {
     reply.code(400);
-    return { error: "startDate must be a valid date in YYYY-MM-DD format" };
-  }
-  if (endDate !== undefined && !isIsoDate(endDate)) {
-    reply.code(400);
-    return { error: "endDate must be a valid date in YYYY-MM-DD format" };
-  }
-  if (startDate && endDate && startDate > endDate) {
-    reply.code(400);
-    return { error: "startDate must be earlier than or equal to endDate" };
+    return { error: boundsError };
   }
   if (page === null) {
     reply.code(400);
