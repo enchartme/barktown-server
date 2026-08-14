@@ -257,6 +257,19 @@ Configure cloudflared to route `barktown-api.enchart.me` to
 `masmopi.tail523149.ts.net` can remain on `http://127.0.0.1:8090`. Do not
 publish the private port through cloudflared.
 
+Once the units are installed, control the complete three-service stack with:
+
+```bash
+npm run serve
+npm stop
+npm restart
+```
+
+The corresponding per-service commands are `npm run serve:ingest`,
+`serve:public`, `serve:private`, and the matching `stop:*` and `restart:*`
+variants. `npm start`, `npm run server`, and `npm run server:private` remain
+foreground commands for local development and debugging.
+
 ---
 
 ## Tests
