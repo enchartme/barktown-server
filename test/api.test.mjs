@@ -16,6 +16,13 @@ let seedDb;
 let publicServer;
 let privateServer;
 
+const recordingContext = {
+  album: "Neighbourhood watch",
+  location: "Test garden",
+  direction: "facing east",
+  copyright: "© 2026 Barktown",
+};
+
 before(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-ingest-test-"));
   const dbPath = path.join(tmpDir, "test.db");
@@ -76,7 +83,16 @@ before(async () => {
     timestamps: [4], confidences: [0.93], loudnesses: [1.3], paddingS: 1.5, windowS: 1.5,
   });
 
-  publicServer = await startTestServer({ dbPath, mode: "public" });
+  publicServer = await startTestServer({
+    dbPath,
+    mode: "public",
+    env: {
+      RECORDING_ALBUM: recordingContext.album,
+      RECORDING_LOCATION: recordingContext.location,
+      RECORDING_DIRECTION: recordingContext.direction,
+      RECORDING_COPYRIGHT: recordingContext.copyright,
+    },
+  });
   privateServer = await startTestServer({ dbPath, mode: "private" });
 });
 
@@ -119,6 +135,15 @@ test("public API is non-cacheable and does not register mutation routes", async 
     method: "DELETE",
   });
   assert.equal(mutation.status, 404);
+});
+
+test("GET /api/recording-context exposes public report metadata", async () => {
+  const res = await fetch(`${publicServer.baseUrl}/api/recording-context`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), recordingContext);
+
+  const privateRes = await fetch(`${privateServer.baseUrl}/api/recording-context`);
+  assert.equal(privateRes.status, 404);
 });
 
 test("private API does not duplicate public data routes", async () => {

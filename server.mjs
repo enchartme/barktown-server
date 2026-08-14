@@ -332,6 +332,15 @@ async function listAvailableSourceWavKeys() {
 }
 
 app.get("/health", async () => ({ ok: true }));
+
+// Public, non-sensitive recording context used to describe generated reports.
+publicApi.get("/api/recording-context", async () => ({
+  album: CFG.recordingAlbum,
+  location: CFG.recordingLocation,
+  direction: CFG.recordingDirection,
+  copyright: CFG.recordingCopyright,
+}));
+
 // ─── Diary entries ───────────────────────────────────────────────────────────────
 
 // Lightweight bootstrap for date-bounded clients such as the report view.

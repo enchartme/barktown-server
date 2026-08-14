@@ -132,6 +132,7 @@ npm run server:private
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Liveness check |
+| `GET /api/recording-context` | Return the public album, location, microphone direction and copyright used in report descriptions |
 | `GET /api/diary` | List diary entries with a live `reanalyzable` indication; optionally filter inclusively with `startDate`/`endDate` |
 | `GET /api/diary/latest-date` | Return the newest available diary date without loading diary entries |
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
