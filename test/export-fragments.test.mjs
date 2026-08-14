@@ -33,7 +33,8 @@ const skip = available
 
 let tmpDir;
 let seedDb;
-let server;
+let publicServer;
+let privateServer;
 let assetServer;
 let trainingDataDir;
 let cacheDir;
@@ -62,10 +63,11 @@ before(async () => {
     durationSec: 2,
   });
 
-  server = await startTestServer({ dbPath });
+  publicServer = await startTestServer({ dbPath, mode: "public" });
+  privateServer = await startTestServer({ dbPath, mode: "private" });
   assetServer = await startStaticServer(assetsDir);
 
-  const res = await fetch(`${server.baseUrl}/api/samples/sample-001/annotations`, {
+  const res = await fetch(`${privateServer.baseUrl}/api/samples/sample-001/annotations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ startSec: 0.5, endSec: 1.0, label: "bark", source: "manual" }),
@@ -75,7 +77,7 @@ before(async () => {
 
 after(async () => {
   if (!available) return;
-  await server.stop();
+  await Promise.all([publicServer.stop(), privateServer.stop()]);
   await assetServer.stop();
   seedDb.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -90,7 +92,7 @@ function runExport(extraArgs = []) {
   return new Promise((resolve, reject) => {
     const proc = spawn("python3", [
       EXPORT_SCRIPT,
-      "--ingest-base", server.baseUrl,
+      "--ingest-base", publicServer.baseUrl,
       "--asset-base", assetServer.baseUrl,
       "--training-data", trainingDataDir,
       "--cache-dir", cacheDir,
@@ -125,7 +127,7 @@ test("re-running with no changes is a no-op", { skip }, async () => {
 });
 
 test("relabeling moves the exported file without re-downloading/re-slicing", { skip }, async () => {
-  const patch = await fetch(`${server.baseUrl}/api/annotations/${annotationId}`, {
+  const patch = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ label: "yap" }),
@@ -139,7 +141,7 @@ test("relabeling moves the exported file without re-downloading/re-slicing", { s
 });
 
 test("deleting the fragment removes its export and prunes the now-unreferenced cached sample", { skip }, async () => {
-  const del = await fetch(`${server.baseUrl}/api/annotations/${annotationId}`, { method: "DELETE" });
+  const del = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}`, { method: "DELETE" });
   assert.equal(del.status, 204);
 
   const out = await runExport();

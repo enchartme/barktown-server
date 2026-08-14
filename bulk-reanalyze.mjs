@@ -18,8 +18,17 @@ if (args.length !== 1 || !isIsoDate(date)) {
   process.exit(2);
 }
 
-const port = process.env.API_PORT ?? "8090";
-const apiBase = (process.env.BULK_REANALYZE_API_URL ?? `http://127.0.0.1:${port}`).replace(/\/$/, "");
+const publicPort = process.env.PUBLIC_API_PORT ?? "8091";
+const privatePort = process.env.PRIVATE_API_PORT ?? process.env.API_PORT ?? "8090";
+const publicApiBase = (
+  process.env.BULK_REANALYZE_PUBLIC_API_URL
+  ?? `http://127.0.0.1:${publicPort}`
+).replace(/\/$/, "");
+const privateApiBase = (
+  process.env.BULK_REANALYZE_PRIVATE_API_URL
+  ?? process.env.BULK_REANALYZE_API_URL
+  ?? `http://127.0.0.1:${privatePort}`
+).replace(/\/$/, "");
 const concurrency = Number.parseInt(process.env.REANALYZE_CONCURRENCY ?? "4", 10);
 if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
   console.error("REANALYZE_CONCURRENCY must be a positive integer.");
@@ -34,9 +43,9 @@ async function readJsonResponse(res) {
 
 let diary;
 try {
-  diary = await readJsonResponse(await fetch(`${apiBase}/api/diary`));
+  diary = await readJsonResponse(await fetch(`${publicApiBase}/api/diary`));
 } catch (error) {
-  console.error(`Could not load diary from ${apiBase}: ${error.message}`);
+  console.error(`Could not load diary from ${publicApiBase}: ${error.message}`);
   process.exit(1);
 }
 
@@ -50,7 +59,8 @@ const eligible = selectReanalyzableEntries(diary, date);
 const skipped = dayEntries.length - eligible.length;
 
 console.log(`Bulk re-analysis: ${date}`);
-console.log(`API: ${apiBase}`);
+console.log(`Read API: ${publicApiBase}`);
+console.log(`Private API: ${privateApiBase}`);
 console.log(`Entries: ${dayEntries.length}; eligible: ${eligible.length}; unavailable: ${skipped}`);
 console.log(`Workers: ${concurrency}`);
 
@@ -62,7 +72,7 @@ if (eligible.length === 0) {
 const results = await runBulkReanalysis(eligible, {
   concurrency,
   analyze: async (entry) => readJsonResponse(await fetch(
-    `${apiBase}/api/diary/${encodeURIComponent(entry.id)}/reanalyze`,
+    `${privateApiBase}/api/diary/${encodeURIComponent(entry.id)}/reanalyze`,
     { method: "POST" },
   )),
   onStart: ({ entry, index, total }) => {

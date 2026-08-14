@@ -18,7 +18,7 @@ before(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-monitor-params-test-"));
   const dbPath = path.join(tmpDir, "test.db");
   seedDb = openDb(dbPath); // openDb() seeds monitor_params idempotently
-  server = await startTestServer({ dbPath });
+  server = await startTestServer({ dbPath, mode: "private" });
 });
 
 after(async () => {

@@ -103,22 +103,31 @@ auto-detection canonical-name migration is documented in
 
 ---
 
-## API server
+## API servers
 
-`server.mjs` is a small Fastify app exposing HTTP endpoints (read + write)
-over the training-samples database. It runs as a separate process from
-`ingest-service.mjs` — SQLite's WAL mode plus a busy timeout (enabled in
-`lib/db.mjs`) safely support multiple writers/readers across processes.
+The HTTP interface is split across two Fastify/Node processes backed by the
+same local SQLite database. `server.mjs` is an anonymous, read-only API suitable
+for publishing through Cloudflare Tunnel. `server-private.mjs` owns every
+mutation plus operator-only reads and must remain reachable only over the
+trusted Tailscale network.
 
-There is **no authentication**. This service is intended to be reachable only
-over the trusted Tailscale network, using the same trust boundary as
-barktown-goblin's status API.
+There is no duplicated business route between the processes. The public API
+opens SQLite with `readonly` and `query_only`; the private API and
+`ingest-service.mjs` are the possible writers. SQLite WAL mode plus a busy
+timeout safely support these readers/writers when all processes use the same
+local filesystem.
 
 ```bash
+# Public read API (127.0.0.1:8091)
 node server.mjs
-# or
 npm run server
+
+# Private mutation/operator API (127.0.0.1:8090)
+node server-private.mjs
+npm run server:private
 ```
+
+### Public API (`barktown-api`)
 
 | Endpoint | Description |
 |---|---|
@@ -126,19 +135,33 @@ npm run server
 | `GET /api/diary` | List diary entries with a live `reanalyzable` indication; optionally filter inclusively with `startDate`/`endDate` |
 | `GET /api/diary/latest-date` | Return the newest available diary date without loading diary entries |
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
+| `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
+| `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
 | `GET /api/annotations` | List every annotation across all samples in one request (includes each annotation's sample `audioPath`/`durationSec`) — for laptop-side training export tooling |
+
+Public responses send `Cache-Control: no-store`; filtering and freshness come
+from live database queries rather than an independently cached data dump.
+
+### Private API (`barktown-api-private`)
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness check |
+| `GET /api/monitor-params` | List Goblin monitor parameters |
+| `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
+| `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
+| `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
+| `DELETE /api/diary/:id` | Delete a diary entry |
+| `POST /api/diary/:id/move-to-samples` | Copy/move a diary recording into training samples |
+| `POST /api/samples/:id/regenerate-waveform` | Regenerate a training-sample waveform |
 | `DELETE /api/samples/:id` | Delete a sample (MinIO objects + DB row) |
 | `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |
 | `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |
 | `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
-| `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
-| `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
-| `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
-| `POST /api/diary/:id/reanalyze` | Deterministically reclassify the available source WAV with Goblin and upsert a manually triggered result |
 
 Bulk hit-metadata responses contain `items`, pagination fields including
 `hasNextPage`, `isLastPage`, and `complete`, plus `links.next`/`links.previous`.
@@ -187,11 +210,13 @@ A failed recording does not stop the rest of the date. Entries without a
 discoverable archive or linked training WAV are counted as unavailable and are
 not submitted.
 
-The CLI connects to `http://127.0.0.1:$API_PORT` and uses the same
-`REANALYZE_CONCURRENCY` value as the API. Set `BULK_REANALYZE_API_URL` only when
-the API is at another address. Changing `REANALYZE_CONCURRENCY` requires a
-`barktown-api` restart; on the four-CPU server the default of four gives one
-Python analyzer process per worker.
+The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits work to
+`http://127.0.0.1:$PRIVATE_API_PORT`. It uses the same
+`REANALYZE_CONCURRENCY` value as the private API. Set the two
+`BULK_REANALYZE_*_API_URL` variables only when either API is at another
+address. Changing `REANALYZE_CONCURRENCY` requires a
+`barktown-api-private` restart; on the four-CPU server the default of four
+gives one Python analyzer process per worker.
 
 For the server-side Python environment, TFLite runtime, model bundle, systemd
 wiring, and smoke-test procedure, follow Goblin's
@@ -203,8 +228,10 @@ a best-effort basis (the database is the source of truth, and
 
 | Variable | Default | Description |
 |---|---|---|
-| `API_HOST` | `127.0.0.1` | Interface to bind |
-| `API_PORT` | `8090` | Port to listen on |
+| `PUBLIC_API_HOST` | `127.0.0.1` | Public API bind interface |
+| `PUBLIC_API_PORT` | `8091` | Public API port; point `barktown-api.enchart.me` here through cloudflared |
+| `PRIVATE_API_HOST` | legacy `API_HOST`, then `127.0.0.1` | Private API bind interface |
+| `PRIVATE_API_PORT` | legacy `API_PORT`, then `8090` | Private API port; expose only through Tailscale |
 | `REANALYZE_PYTHON_BIN` | `python3` | Python environment containing Goblin's inference dependencies |
 | `REANALYZE_SCRIPT_PATH` | sibling `barktown-goblin/tools/analyze_wav.py` | Goblin offline analyzer |
 | `REANALYZE_MODEL_DIR` | sibling `barktown-goblin/models` | Directory containing YAMNet and the classifier metadata pair |
@@ -212,16 +239,22 @@ a best-effort basis (the database is the source of truth, and
 | `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Kill an analyzer whose JSON/stdout exceeds this size |
 | `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
 | `REANALYZE_CONCURRENCY` | `4` | Maximum concurrent analyzer processes; also used by the bulk CLI worker pool |
-| `BULK_REANALYZE_API_URL` | `http://127.0.0.1:$API_PORT` | API base URL used only by `npm run bulk-reanalyze` |
+| `BULK_REANALYZE_PUBLIC_API_URL` | `http://127.0.0.1:$PUBLIC_API_PORT` | Read API used by `npm run bulk-reanalyze` |
+| `BULK_REANALYZE_PRIVATE_API_URL` | `http://127.0.0.1:$PRIVATE_API_PORT` | Mutation API used by `npm run bulk-reanalyze` |
 
-Deploy it the same way as the ingest service — copy `barktown-api.service` to
-`/etc/systemd/system/` and enable it:
+Deploy both unit files and enable both processes:
 
 ```bash
 sudo cp ~/git/enchartme/barktown-ingest/barktown-api.service /etc/systemd/system/
+sudo cp ~/git/enchartme/barktown-ingest/barktown-api-private.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now barktown-api
+sudo systemctl enable --now barktown-api barktown-api-private
 ```
+
+Configure cloudflared to route `barktown-api.enchart.me` to
+`http://127.0.0.1:8091`. The existing Tailscale Serve route for
+`masmopi.tail523149.ts.net` can remain on `http://127.0.0.1:8090`. Do not
+publish the private port through cloudflared.
 
 ---
 
@@ -231,13 +264,11 @@ sudo systemctl enable --now barktown-api
 npm test
 ```
 
-`test/api.test.mjs` runs the real `server.mjs` as a child process against a
-throwaway SQLite DB (no mocking) and exercises the HTTP API directly:
-health check, CORS preflight (regression test for the `@fastify/cors`
-default-methods gotcha that broke PATCH/DELETE from the browser), sample
-lookup, and the full annotation CRUD flow including the aggregate
-`GET /api/annotations`. No external services are needed — none of the
-routes under test call MinIO.
+`test/api.test.mjs` runs both real API processes against one throwaway WAL
+database (no mocking). It verifies mutually exclusive route ownership,
+read-after-write behavior across processes, health checks, CORS preflight,
+sample lookup, and annotation CRUD. No external services are needed for the
+mutations under test.
 
 `test/export-fragments.test.mjs` additionally smoke-tests
 `barktown-goblin`'s `tools/export_fragments.py` end to end: fresh export,
@@ -250,8 +281,8 @@ inspects its output files. This suite is skipped automatically unless
 `tools/export_fragments.py`) are both present.
 
 Fixtures and test helpers live under `test/fixtures/` (synthetic WAV
-generation) and `test/helpers/` (spawning `server.mjs`, a static file
-server, and free-port allocation) — nothing is checked in as binary data.
+generation) and `test/helpers/` (spawning either API, a static file server,
+and free-port allocation) — nothing is checked in as binary data.
 
 ---
 

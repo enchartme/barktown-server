@@ -5,7 +5,7 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 
-import { getHitMetadata, openDb, upsertHitMetadata } from "../lib/db.mjs";
+import { getHitMetadata, openDb, openReadonlyDb, upsertHitMetadata } from "../lib/db.mjs";
 
 
 test("openDb migrates legacy hit_metadata rows to provenance columns", () => {
@@ -56,6 +56,27 @@ test("openDb migrates legacy hit_metadata rows to provenance columns", () => {
     assert.notEqual(updated.createdAt, "2026-01-01T00:00:00Z");
   } finally {
     db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("openReadonlyDb shares live WAL reads but rejects writes", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-readonly-db-test-"));
+  const dbPath = path.join(tmpDir, "shared.db");
+  const writer = openDb(dbPath);
+  const reader = openReadonlyDb(dbPath);
+  try {
+    upsertHitMetadata(writer, "concurrent-clip", {
+      timestamps: [1], confidences: [0.9], loudnesses: [1.1], paddingS: 0, windowS: 1.5,
+    });
+    assert.equal(getHitMetadata(reader, "concurrent-clip").clipId, "concurrent-clip");
+    assert.throws(
+      () => reader.prepare("DELETE FROM hit_metadata").run(),
+      /readonly|read-only/i,
+    );
+  } finally {
+    reader.close();
+    writer.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

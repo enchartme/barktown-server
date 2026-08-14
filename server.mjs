@@ -1,27 +1,25 @@
 #!/usr/bin/env node
 /**
- * barktown-ingest — HTTP API over the training-samples database.
+ * barktown-ingest — public read-only HTTP API over the Barktown database.
  *
- * Read endpoints: list/get samples and their annotations.
- * Mutating endpoints: delete a sample, rename/move it between categories,
- * and add/edit/delete fragment annotations.
+ * This is the public entry point. server-private.mjs imports the same route
+ * implementation in private mode, so every business endpoint belongs to
+ * exactly one of the two processes.
  *
  * This runs as a separate process from ingest-service.mjs (which also
  * writes to the database on new uploads). SQLite's WAL mode + a busy
  * timeout (lib/db.mjs) support multiple writers/readers across processes.
  *
- * No authentication: this is intended to be reachable only over Tailscale
- * (LAN/VLAN), same trust model as barktown-goblin's own status API.
- * Training samples are ephemeral and backed up elsewhere, so open
- * read/write access on the tailnet is an accepted tradeoff for now.
- * Add auth before exposing this beyond the tailnet, or before adding
- * mutating routes for the (non-ephemeral) diary recordings corpus.
+ * Public mode exposes only anonymous GET routes and opens SQLite read-only.
+ * Private mode exposes mutations and operator-only reads over Tailscale.
  *
  * ─── Configuration ─────────────────────────────────────────
  *
  *  DB_PATH    Local SQLite database file   (default: ./data/barktown.db)
- *  API_HOST   Interface to bind            (default: 127.0.0.1)
- *  API_PORT   Port to listen on            (default: 8090)
+ *  PUBLIC_API_HOST    Public bind interface   (default: 127.0.0.1)
+ *  PUBLIC_API_PORT    Public port             (default: 8091)
+ *  PRIVATE_API_HOST   Private bind interface  (default: legacy API_HOST)
+ *  PRIVATE_API_PORT   Private port            (default: legacy API_PORT, then 8090)
  *
  * ─── Running ───────────────────────────────────────────────────
  *
@@ -52,7 +50,7 @@ import {
   ReanalysisAlreadyRunningError,
 } from "./lib/reanalysis-limiter.mjs";
 import {
-  openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
+  openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
   listDiaryEntries, getLatestDiaryDate, getDiaryEntry, deleteDiaryEntryRow,
@@ -64,16 +62,43 @@ import { log, warn, err } from "./lib/log.mjs";
 import { generateWaveform } from "./lib/audio.mjs";
 
 const CFG = buildConfig();
-const db = openDb(CFG.dbPath);
+const API_MODE = process.env.BARKTOWN_API_MODE ?? "public";
+if (API_MODE !== "public" && API_MODE !== "private") {
+  throw new Error(`BARKTOWN_API_MODE must be "public" or "private", received: ${API_MODE}`);
+}
+const isPublicApi = API_MODE === "public";
+const db = isPublicApi ? openReadonlyDb(CFG.dbPath) : openDb(CFG.dbPath);
 const mc = createClient(CFG.minio);
-const reanalysisLimiter = createReanalysisLimiter({ concurrency: CFG.reanalyze.concurrency });
+const reanalysisLimiter = isPublicApi
+  ? null
+  : createReanalysisLimiter({ concurrency: CFG.reanalyze.concurrency });
 
 const app = Fastify({ logger: false });
-// @fastify/cors defaults `methods` to "GET,HEAD,POST" — must list the
-// mutating verbs explicitly or their preflight (OPTIONS) requests get
-// rejected with "CORS Method Not Found", which browsers then report as a
-// generic CORS failure on the real PATCH/DELETE request.
-await app.register(cors, { origin: true, methods: ["GET", "HEAD", "PUT", "POST", "PATCH", "DELETE", "OPTIONS"] });
+const corsMethods = isPublicApi
+  ? ["GET", "HEAD", "OPTIONS"]
+  : ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"];
+await app.register(cors, { origin: true, methods: corsMethods });
+
+if (isPublicApi) {
+  // The public API is a live, filtered database view. Keep Cloudflare and
+  // browsers from turning it into an independently invalidated data store.
+  app.addHook("onSend", async (_req, reply, payload) => {
+    reply.header("Cache-Control", "no-store");
+    return payload;
+  });
+}
+
+// Disabled registrars intentionally do nothing. This keeps all route logic in
+// one implementation while making route ownership explicit and non-overlapping.
+const publicApi = {
+  get: (...args) => isPublicApi && app.get(...args),
+};
+const privateApi = {
+  get: (...args) => !isPublicApi && app.get(...args),
+  post: (...args) => !isPublicApi && app.post(...args),
+  patch: (...args) => !isPublicApi && app.patch(...args),
+  delete: (...args) => !isPublicApi && app.delete(...args),
+};
 
 /** Regenerate training-samples-index.json in MinIO from the current DB contents.
  * Best-effort: the DB is the source of truth, and ingest-service.mjs regenerates
@@ -310,10 +335,10 @@ app.get("/health", async () => ({ ok: true }));
 // ─── Diary entries ───────────────────────────────────────────────────────────────
 
 // Lightweight bootstrap for date-bounded clients such as the report view.
-app.get("/api/diary/latest-date", async () => ({ date: getLatestDiaryDate(db) }));
+publicApi.get("/api/diary/latest-date", async () => ({ date: getLatestDiaryDate(db) }));
 
 // List diary entries, ordered by datetime (oldest first). Date bounds are inclusive.
-app.get("/api/diary", async (req, reply) => {
+publicApi.get("/api/diary", async (req, reply) => {
   const { startDate, endDate } = req.query ?? {};
   const boundsError = dateBoundsError(startDate, endDate);
   if (boundsError) {
@@ -330,7 +355,7 @@ app.get("/api/diary", async (req, reply) => {
 
 // Bulk hit metadata. Date bounds are inclusive and filter on diary_entries.date.
 // Rows without a linked diary entry are included only when no date bound is used.
-app.get("/api/hit-metadata", async (req, reply) => {
+publicApi.get("/api/hit-metadata", async (req, reply) => {
   const { startDate, endDate } = req.query ?? {};
   const page = parsePositiveInteger(req.query?.page, 1);
   const pageSize = parsePositiveInteger(req.query?.pageSize, MAX_HIT_METADATA_PAGE_SIZE, MAX_HIT_METADATA_PAGE_SIZE);
@@ -384,7 +409,7 @@ app.get("/api/hit-metadata", async (req, reply) => {
 });
 
 // Get a single diary entry.
-app.get("/api/diary/:id", async (req, reply) => {
+publicApi.get("/api/diary/:id", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
@@ -402,7 +427,7 @@ app.get("/api/diary/:id", async (req, reply) => {
 
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).
 // Returns 404 if no metadata has been submitted for this clip.
-app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
+publicApi.get("/api/diary/:id/hit-metadata", async (req, reply) => {
   const meta = getHitMetadata(db, req.params.id);
   if (!meta) {
     reply.code(404);
@@ -414,7 +439,7 @@ app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
 // Store hit metadata sent by barktown-goblin immediately after a successful upload.
 // The corresponding diary_entries row may not exist yet (ingest service is asynchronous),
 // so this is an upsert keyed on clip_id with no FK requirement.
-app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
+privateApi.post("/api/diary/:id/hit-metadata", async (req, reply) => {
   const payload = req.body ?? {};
   const {
     timestamps,
@@ -455,14 +480,14 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
 // tuning, also used as this API's reanalyze defaults) ─────────────────────────
 
 // List all monitor params (current + default value, allowed range, description).
-app.get("/api/monitor-params", async () => {
+privateApi.get("/api/monitor-params", async () => {
   return listMonitorParams(db);
 });
 
 // Update one monitor param's current value. barktown-goblin picks this up
 // next time its statusd POSTs /monitor-params/fetch (or the monitor process's
 // own periodic re-check runs); this route itself only updates the DB.
-app.patch("/api/monitor-params/:paramId", async (req, reply) => {
+privateApi.patch("/api/monitor-params/:paramId", async (req, reply) => {
   const { value } = req.body ?? {};
   try {
     const updated = setMonitorParam(db, req.params.paramId, value);
@@ -483,7 +508,7 @@ app.patch("/api/monitor-params/:paramId", async (req, reply) => {
 // values barktown-goblin's live monitor uses); optional body fields override
 // them for this one run: candidateThreshold, hitRefractoryS,
 // inferenceWindowS, scoreIntervalS — all range-validated finite numbers.
-app.post("/api/diary/:id/reanalyze", async (req, reply) => {
+privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
@@ -572,7 +597,7 @@ app.post("/api/diary/:id/reanalyze", async (req, reply) => {
 
 // Delete a diary entry: removes the audio + waveform objects from MinIO and
 // the DB row. Returns 204 on success.
-app.delete("/api/diary/:id", async (req, reply) => {
+privateApi.delete("/api/diary/:id", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
@@ -612,7 +637,7 @@ app.delete("/api/diary/:id", async (req, reply) => {
 // The sample is copied from the original, uncompressed WAV archive; the
 // ingest service will notice the new training-samples/ object, generate its
 // waveform, and populate the samples database in its normal poll cycle.
-app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
+privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
@@ -746,7 +771,7 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
 // Regenerate the waveform for a training sample at a higher pixels-per-second
 // resolution, replacing the existing waveform object in MinIO and updating the DB.
-app.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
+privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -787,12 +812,12 @@ app.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
 
 // ─── Training samples (read-only) ────────────────────────────────────────────
 
-app.get("/api/samples", async (req) => {
+publicApi.get("/api/samples", async (req) => {
   const label = typeof req.query.label === "string" ? req.query.label : undefined;
   return listSamples(db, { label });
 });
 
-app.get("/api/samples/:id", async (req, reply) => {
+publicApi.get("/api/samples/:id", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -801,7 +826,7 @@ app.get("/api/samples/:id", async (req, reply) => {
   return sample;
 });
 
-app.get("/api/samples/:id/annotations", async (req, reply) => {
+publicApi.get("/api/samples/:id/annotations", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -813,7 +838,7 @@ app.get("/api/samples/:id/annotations", async (req, reply) => {
 // All annotations across all active samples, in one request — for laptop-side
 // training export tools (tools/export_fragments.py in barktown-goblin) that
 // need to sync the whole corpus without one request per sample.
-app.get("/api/annotations", async () => {
+publicApi.get("/api/annotations", async () => {
   return listAllAnnotations(db);
 });
 
@@ -821,7 +846,7 @@ app.get("/api/annotations", async () => {
 
 // Delete a sample: removes the audio + waveform objects from MinIO, the DB
 // row (annotations cascade), and regenerates training-samples-index.json.
-app.delete("/api/samples/:id", async (req, reply) => {
+privateApi.delete("/api/samples/:id", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -852,7 +877,7 @@ app.delete("/api/samples/:id", async (req, reply) => {
 // filename (label is embedded in it), the sample id (derived from the
 // filename), and the audio/waveform object keys, moving the underlying
 // MinIO objects to match.
-app.patch("/api/samples/:id", async (req, reply) => {
+privateApi.patch("/api/samples/:id", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -913,7 +938,7 @@ app.patch("/api/samples/:id", async (req, reply) => {
 
 // ─── Annotations (mutating) ────────────────────────────────────────────────
 
-app.post("/api/samples/:id/annotations", async (req, reply) => {
+privateApi.post("/api/samples/:id/annotations", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -934,7 +959,7 @@ app.post("/api/samples/:id/annotations", async (req, reply) => {
   return annotation;
 });
 
-app.patch("/api/annotations/:annotationId", async (req, reply) => {
+privateApi.patch("/api/annotations/:annotationId", async (req, reply) => {
   const annotationId = Number(req.params.annotationId);
   const existing = getAnnotation(db, annotationId);
   if (!existing) {
@@ -957,7 +982,7 @@ app.patch("/api/annotations/:annotationId", async (req, reply) => {
   return updateAnnotation(db, annotationId, merged);
 });
 
-app.delete("/api/annotations/:annotationId", async (req, reply) => {
+privateApi.delete("/api/annotations/:annotationId", async (req, reply) => {
   const annotationId = Number(req.params.annotationId);
   const existing = getAnnotation(db, annotationId);
   if (!existing) {
@@ -971,14 +996,23 @@ app.delete("/api/annotations/:annotationId", async (req, reply) => {
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
-const port = parseInt(process.env.API_PORT ?? "8090", 10);
-const host = process.env.API_HOST ?? "127.0.0.1";
+const serviceName = isPublicApi ? "barktown-api" : "barktown-api-private";
+const port = parseInt(
+  isPublicApi
+    ? (process.env.PUBLIC_API_PORT ?? "8091")
+    : (process.env.PRIVATE_API_PORT ?? process.env.API_PORT ?? "8090"),
+  10,
+);
+const host = isPublicApi
+  ? (process.env.PUBLIC_API_HOST ?? "127.0.0.1")
+  : (process.env.PRIVATE_API_HOST ?? process.env.API_HOST ?? "127.0.0.1");
 
 try {
   await app.listen({ port, host });
-  log(`barktown-api listening on http://${host}:${port}`);
+  log(`${serviceName} listening on http://${host}:${port}`);
+  log(`  access: ${isPublicApi ? "anonymous read-only" : "Tailnet private"}`);
   log(`  db: ${CFG.dbPath}`);
-  log(`  re-analysis workers: ${CFG.reanalyze.concurrency}`);
+  if (!isPublicApi) log(`  re-analysis workers: ${CFG.reanalyze.concurrency}`);
 } catch (e) {
   err(e);
   process.exit(1);

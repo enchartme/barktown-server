@@ -1,5 +1,5 @@
 [Unit]
-Description=barktown public read-only API
+Description=barktown private mutation and operator API
 After=network-online.target barktown-ingest.service
 Wants=network-online.target
 
@@ -8,18 +8,17 @@ Type=simple
 User=pi
 
 WorkingDirectory=/home/pi/git/enchartme/barktown-ingest
-ExecStart=/usr/bin/node server.mjs
+ExecStart=/usr/bin/node server-private.mjs
 Restart=on-failure
 RestartSec=10s
 
-# Edit .env in the WorkingDirectory to set DB_PATH / PUBLIC_API_HOST /
-# PUBLIC_API_PORT.
-# This process opens SQLite read-only and is safe to publish through cloudflared.
+# Edit .env in the WorkingDirectory to set DB_PATH / PRIVATE_API_HOST /
+# PRIVATE_API_PORT overrides. No auth — expose only over Tailscale.
 EnvironmentFile=/home/pi/git/enchartme/barktown-ingest/.env
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=barktown-api
+SyslogIdentifier=barktown-api-private
 
 [Install]
 WantedBy=multi-user.target
