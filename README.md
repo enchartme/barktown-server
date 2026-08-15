@@ -145,6 +145,9 @@ npm run server:private
 
 Public responses send `Cache-Control: no-store`; filtering and freshness come
 from live database queries rather than an independently cached data dump.
+Diary entries include an `annotations` array containing only whole-recording
+notes. Linked recordings expose their sample-wide `0..0` note annotations;
+unlinked recordings expose the equivalent diary-scoped notes.
 
 ### Private API (`barktown-api-private`)
 
@@ -152,6 +155,7 @@ from live database queries rather than an independently cached data dump.
 |---|---|
 | `GET /health` | Liveness check |
 | `GET /api/monitor-params` | List Goblin monitor parameters |
+| `PUT /api/diary/:id/comment` | Add or replace the whole-recording note, using the linked sample annotation when available |
 | `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |

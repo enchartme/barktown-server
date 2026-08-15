@@ -77,6 +77,19 @@ before(async () => {
     upsertHitMetadata(seedDb, id, {
       timestamps: [second], confidences: [0.92], loudnesses: [1.2], paddingS: 1.5, windowS: 1.5,
     });
+    if (day === "03") {
+      upsertSample(seedDb, {
+        id: "sample-linked",
+        filename: "2026-01-03 13-14-15 SAMPLE bark.wav",
+        audioPath: "training-samples/bark/2026-01-03 13-14-15 SAMPLE bark.wav",
+        waveformPath: null,
+        label: "bark",
+        date: "2026-01-03",
+        datetimeLocal: "2026-01-03T13:14:15",
+        durationSec: 8,
+        diaryId: id,
+      });
+    }
   }
   // Metadata can arrive before asynchronous diary ingestion creates its row.
   upsertHitMetadata(seedDb, "orphan-clip", {
@@ -110,7 +123,7 @@ test("both API processes report healthy", async () => {
   }
 });
 
-test("CORS preflight allows PATCH and DELETE", async () => {
+test("CORS preflight allows PUT, PATCH and DELETE", async () => {
   // Regression test for the bug where @fastify/cors's default `methods`
   // ("GET,HEAD,POST") silently rejected PATCH/DELETE preflight requests,
   // which browsers reported as a generic, hard-to-diagnose CORS failure.
@@ -122,6 +135,7 @@ test("CORS preflight allows PATCH and DELETE", async () => {
     },
   });
   const allowed = res.headers.get("access-control-allow-methods") ?? "";
+  assert.match(allowed, /PUT/);
   assert.match(allowed, /PATCH/);
   assert.match(allowed, /DELETE/);
 });
@@ -175,6 +189,70 @@ test("GET /api/diary/latest-date returns only the newest available date", async 
   const res = await fetch(`${publicServer.baseUrl}/api/diary/latest-date`);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { date: "2026-01-04" });
+});
+
+test("PUT /api/diary/:id/comment creates and updates an unlinked diary note", async () => {
+  const url = `${privateServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/comment`;
+  const create = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "Garden comment" }),
+  });
+  assert.equal(create.status, 200);
+  const created = await create.json();
+  assert.equal(created.length, 1);
+  assert.equal(created[0].scope, "diary");
+  assert.equal(created[0].label, "Garden comment");
+
+  const update = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "Updated garden comment" }),
+  });
+  assert.equal(update.status, 200);
+  const updated = await update.json();
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].id, created[0].id);
+  assert.equal(updated[0].label, "Updated garden comment");
+
+  const publicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
+  assert.equal(publicEntry.status, 200);
+  assert.deepEqual((await publicEntry.json()).annotations, updated);
+});
+
+test("PUT /api/diary/:id/comment uses a linked sample-wide annotation", async () => {
+  const res = await fetch(`${privateServer.baseUrl}/api/diary/2026-01-03_13-14-15_auto/comment`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "Linked automatic comment" }),
+  });
+  assert.equal(res.status, 200);
+  const annotations = await res.json();
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].scope, "sample");
+  assert.equal(annotations[0].sampleId, "sample-linked");
+  assert.equal(annotations[0].label, "Linked automatic comment");
+
+  const publicList = await fetch(`${publicServer.baseUrl}/api/diary?startDate=2026-01-03&endDate=2026-01-03`);
+  const entries = await publicList.json();
+  assert.deepEqual(entries[0].annotations, annotations);
+});
+
+test("PUT /api/diary/:id/comment validates the label and stays private", async () => {
+  const path = "/api/diary/2026-01-04_13-14-15_auto/comment";
+  const invalid = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "   " }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const publicMutation = await fetch(`${publicServer.baseUrl}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "not allowed" }),
+  });
+  assert.equal(publicMutation.status, 404);
 });
 
 test("GET /api/diary validates date bounds", async () => {

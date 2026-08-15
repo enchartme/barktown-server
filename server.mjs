@@ -54,6 +54,7 @@ import {
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
   listDiaryEntries, getLatestDiaryDate, getDiaryEntry, deleteDiaryEntryRow,
+  listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertSample,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
@@ -76,7 +77,7 @@ const reanalysisLimiter = isPublicApi
 const app = Fastify({ logger: false });
 const corsMethods = isPublicApi
   ? ["GET", "HEAD", "OPTIONS"]
-  : ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"];
+  : ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 await app.register(cors, { origin: true, methods: corsMethods });
 
 if (isPublicApi) {
@@ -96,6 +97,7 @@ const publicApi = {
 const privateApi = {
   get: (...args) => !isPublicApi && app.get(...args),
   post: (...args) => !isPublicApi && app.post(...args),
+  put: (...args) => !isPublicApi && app.put(...args),
   patch: (...args) => !isPublicApi && app.patch(...args),
   delete: (...args) => !isPublicApi && app.delete(...args),
 };
@@ -306,10 +308,20 @@ async function findSourceWav(entry) {
 }
 
 /** Add a live reanalyzable indication without exposing internal MinIO paths. */
-function publicDiaryEntry(entry, availableKeys) {
+function publicDiaryEntry(entry, availableKeys, annotations = []) {
   const sourcePath = availableSourceWavPath(entry, CFG, availableKeys);
   const { sourceWavPath, sourceWavEtag, sampleAudioPath, ...publicEntry } = entry;
-  return { ...publicEntry, reanalyzable: sourcePath !== null };
+  return { ...publicEntry, reanalyzable: sourcePath !== null, annotations };
+}
+
+function annotationsByDiaryId(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const annotations = grouped.get(row.diaryId) ?? [];
+    annotations.push(row);
+    grouped.set(row.diaryId, annotations);
+  }
+  return grouped;
 }
 
 /** List current WAV keys using two prefix scans rather than one stat per row. */
@@ -355,11 +367,17 @@ publicApi.get("/api/diary", async (req, reply) => {
     return { error: boundsError };
   }
 
-  const [entries, availableKeys] = await Promise.all([
+  const [entries, availableKeys, commentAnnotations] = await Promise.all([
     Promise.resolve(listDiaryEntries(db, { startDate, endDate })),
     listAvailableSourceWavKeys(),
+    Promise.resolve(listDiaryCommentAnnotations(db, { startDate, endDate })),
   ]);
-  return entries.map(entry => publicDiaryEntry(entry, availableKeys));
+  const commentsByDiaryId = annotationsByDiaryId(commentAnnotations);
+  return entries.map(entry => publicDiaryEntry(
+    entry,
+    availableKeys,
+    commentsByDiaryId.get(entry.id) ?? [],
+  ));
 });
 
 // Bulk hit metadata. Date bounds are inclusive and filter on diary_entries.date.
@@ -431,7 +449,47 @@ publicApi.get("/api/diary/:id", async (req, reply) => {
     warn(`could not inspect re-analysis source for ${entry.id}: ${e.message}`);
   }
   const available = new Set(source ? [source.objectKey] : []);
-  return publicDiaryEntry(entry, available);
+  const annotations = listDiaryCommentAnnotations(db, { diaryId: entry.id });
+  return publicDiaryEntry(entry, available, annotations);
+});
+
+// Create or replace the whole-recording comment through one diary-centric
+// endpoint. Linked clips keep the note on their training sample; unlinked
+// clips use diary_notes and expose the same annotation shape to clients.
+privateApi.put("/api/diary/:id/comment", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+  if (!label) {
+    reply.code(400);
+    return { error: "label is required" };
+  }
+
+  if (entry.sampleId) {
+    const existing = listAnnotations(db, entry.sampleId).find(annotation => (
+      annotation.source === "note"
+      && annotation.startSec === 0
+      && annotation.endSec === 0
+    ));
+    if (existing) {
+      updateAnnotation(db, existing.id, { label });
+    } else {
+      insertAnnotation(db, entry.sampleId, {
+        startSec: 0,
+        endSec: 0,
+        label,
+        source: "note",
+      });
+    }
+  } else {
+    upsertDiaryNote(db, entry.id, label);
+  }
+
+  return listDiaryCommentAnnotations(db, { diaryId: entry.id });
 });
 
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).
@@ -662,6 +720,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   }
 
   const keepInDiary = Boolean(req.body?.keepInDiary);
+  const diaryNote = getDiaryNote(db, entry.id);
 
   let sourceStat;
   let destinationStat;
@@ -739,6 +798,24 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       durationSec: entry.durationSec ?? 0,
       diaryId: entry.id,
     });
+    if (diaryNote) {
+      const existingWholeNote = listAnnotations(db, newParsed.id).find(annotation => (
+        annotation.source === "note"
+        && annotation.startSec === 0
+        && annotation.endSec === 0
+      ));
+      if (existingWholeNote) {
+        updateAnnotation(db, existingWholeNote.id, { label: diaryNote.label });
+      } else {
+        insertAnnotation(db, newParsed.id, {
+          startSec: 0,
+          endSec: 0,
+          label: diaryNote.label,
+          source: "note",
+        });
+      }
+      if (keepInDiary) deleteDiaryNote(db, entry.id);
+    }
     if (hitMeta && hitMeta.timestamps.length > 0) {
       // timestamps[i] is the *end* anchor of the detection window (see
       // AudioPlayerPanel's hx comment), not the start — so the fragment
