@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=pi
 
-WorkingDirectory=/home/pi/git/enchartme/barktown-ingest
+WorkingDirectory=/home/pi/git/enchartme/barktown-server
 ExecStart=/usr/bin/node ingest-service.mjs
 Restart=on-failure
 RestartSec=10s
 
 # Edit .env in the WorkingDirectory to set credentials and overrides (see .env.example)
-EnvironmentFile=/home/pi/git/enchartme/barktown-ingest/.env
+EnvironmentFile=/home/pi/git/enchartme/barktown-server/.env
 
 StandardOutput=journal
 StandardError=journal

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * barktown-ingest — public read-only HTTP API over the Barktown database.
+ * barktown-server — public read-only HTTP API over the Barktown database.
  *
  * This is the public entry point. server-private.mjs imports the same route
  * implementation in private mode, so every business endpoint belongs to

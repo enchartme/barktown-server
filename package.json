@@ -1,8 +1,8 @@
 {
-  "name": "barktown-ingest",
+  "name": "barktown-server",
   "version": "0.1.0",
   "private": true,
-  "description": "Pi-side ingest service for barktown — watches MinIO /new/, validates filenames, generates waveforms, organises audio, updates index.json",
+  "description": "Pi-side ingest and API services for barktown",
   "type": "module",
   "scripts": {
     "start": "node ingest-service.mjs",

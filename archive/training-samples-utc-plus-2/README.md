@@ -21,7 +21,7 @@ updated sample IDs, filenames, object paths, dates, timestamps, and annotation
 The on-device backup was written to:
 
 ```text
-/home/pi/git/enchartme/barktown-ingest/data/backups/training-samples-utc-plus-2-20260731154952
+/home/pi/git/enchartme/barktown-server/data/backups/training-samples-utc-plus-2-20260731154952
 ```
 
 It contains the consistent SQLite database backup, SQL and JSON exports, the

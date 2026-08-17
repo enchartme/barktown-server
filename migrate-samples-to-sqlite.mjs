@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * barktown-ingest — one-off migration: import the existing
+ * barktown-server — one-off migration: import the existing
  * training-samples-index.json (in MinIO) into the local SQLite database.
  *
  * Safe to re-run: upsert-based, existing rows are just refreshed.

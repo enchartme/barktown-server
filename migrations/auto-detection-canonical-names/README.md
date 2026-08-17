@@ -47,7 +47,7 @@ deleted only after the DB transaction commits.
 Deploy the Goblin and ingest/API naming changes before applying the migration,
 so new traffic cannot recreate legacy IDs.
 
-From the `barktown-ingest` checkout on the Pi:
+From the `barktown-server` checkout on the Pi:
 
 ```bash
 npm install

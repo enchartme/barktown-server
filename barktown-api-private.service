@@ -7,14 +7,14 @@ Wants=network-online.target
 Type=simple
 User=pi
 
-WorkingDirectory=/home/pi/git/enchartme/barktown-ingest
+WorkingDirectory=/home/pi/git/enchartme/barktown-server
 ExecStart=/usr/bin/node server-private.mjs
 Restart=on-failure
 RestartSec=10s
 
 # Edit .env in the WorkingDirectory to set DB_PATH / PRIVATE_API_HOST /
 # PRIVATE_API_PORT overrides. No auth — expose only over Tailscale.
-EnvironmentFile=/home/pi/git/enchartme/barktown-ingest/.env
+EnvironmentFile=/home/pi/git/enchartme/barktown-server/.env
 
 StandardOutput=journal
 StandardError=journal

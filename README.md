@@ -1,6 +1,6 @@
-# barktown-ingest
+# barktown-server
 
-Pi-side ingest service for **barktown**. Watches the `upload-here/` prefix in a MinIO bucket, validates filenames, generates waveform data, organises audio into `audio/YYYY/MM/` and keeps `index.json` up to date.
+Pi-side ingest and API services for **barktown**. The ingest service watches the `upload-here/` prefix in a MinIO bucket, validates filenames, generates waveform data, organises audio into `audio/YYYY/MM/` and keeps `index.json` up to date.
 
 ---
 
@@ -48,8 +48,8 @@ sudo apt install ./audiowaveform_${VER}-1-12_arm64.deb
 ## Install
 
 ```bash
-git clone <this-repo> ~/barktown-ingest
-cd ~/barktown-ingest
+git clone <this-repo> ~/barktown-server
+cd ~/barktown-server
 npm install
 ```
 
@@ -204,7 +204,7 @@ current diary, selects only entries on that date whose source WAV is currently
 available, and submits them through a bounded worker pool:
 
 ```bash
-cd ~/git/enchartme/barktown-ingest
+cd ~/git/enchartme/barktown-server
 npm run bulk-reanalyze -- 2026-08-12
 ```
 
@@ -250,8 +250,8 @@ a best-effort basis (the database is the source of truth, and
 Deploy both unit files and enable both processes:
 
 ```bash
-sudo cp ~/git/enchartme/barktown-ingest/barktown-api.service /etc/systemd/system/
-sudo cp ~/git/enchartme/barktown-ingest/barktown-api-private.service /etc/systemd/system/
+sudo cp ~/git/enchartme/barktown-server/barktown-api.service /etc/systemd/system/
+sudo cp ~/git/enchartme/barktown-server/barktown-api-private.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now barktown-api barktown-api-private
 ```
@@ -324,7 +324,7 @@ MINIO_ACCESS_KEY=yourkey MINIO_SECRET_KEY=yoursecret node ingest-service.mjs
 ### 1 — Create your `.env` file
 
 ```bash
-cd ~/git/enchartme/barktown-ingest
+cd ~/git/enchartme/barktown-server
 cp .env.example .env
 nano .env          # set MINIO_ACCESS_KEY, MINIO_SECRET_KEY, and anything else
 ```
@@ -333,10 +333,10 @@ nano .env          # set MINIO_ACCESS_KEY, MINIO_SECRET_KEY, and anything else
 
 ### 2 — Install the service unit
 
-The unit file uses `%h` (systemd's home-directory specifier for the `User=` account) so paths resolve automatically as long as your clone is at `~/git/enchartme/barktown-ingest`.
+The unit file uses `%h` (systemd's home-directory specifier for the `User=` account) so paths resolve automatically as long as your clone is at `~/git/enchartme/barktown-server`.
 
 ```bash
-sudo cp ~/git/enchartme/barktown-ingest/barktown-ingest.service /etc/systemd/system/
+sudo cp ~/git/enchartme/barktown-server/barktown-ingest.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now barktown-ingest
 ```
@@ -353,7 +353,7 @@ journalctl -u barktown-ingest -f    # live log tail
 No reinstall needed — just restart the service:
 
 ```bash
-cd ~/git/enchartme/barktown-ingest
+cd ~/git/enchartme/barktown-server
 git pull
 npm install                          # only needed if package.json changed
 sudo systemctl restart barktown-ingest

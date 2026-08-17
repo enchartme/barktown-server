@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=pi
 
-WorkingDirectory=/home/pi/git/enchartme/barktown-ingest
+WorkingDirectory=/home/pi/git/enchartme/barktown-server
 ExecStart=/usr/bin/node server.mjs
 Restart=on-failure
 RestartSec=10s
@@ -15,7 +15,7 @@ RestartSec=10s
 # Edit .env in the WorkingDirectory to set DB_PATH / PUBLIC_API_HOST /
 # PUBLIC_API_PORT.
 # This process opens SQLite read-only and is safe to publish through cloudflared.
-EnvironmentFile=/home/pi/git/enchartme/barktown-ingest/.env
+EnvironmentFile=/home/pi/git/enchartme/barktown-server/.env
 
 StandardOutput=journal
 StandardError=journal

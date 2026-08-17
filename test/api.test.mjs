@@ -24,7 +24,7 @@ const recordingContext = {
 };
 
 before(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-ingest-test-"));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-server-test-"));
   const dbPath = path.join(tmpDir, "test.db");
 
   seedDb = openDb(dbPath);
