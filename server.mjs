@@ -54,7 +54,7 @@ import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
-  listDiaryEntries, getLatestDiaryDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
+  listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertSample,
@@ -251,6 +251,49 @@ function dateBoundsError(startDate, endDate) {
   return null;
 }
 
+const SUMMARY_MAX_DAYS = 3660;
+
+function diarySummaryBoundsError(startDate, endDate) {
+  if (startDate === undefined || endDate === undefined) {
+    return "startDate and endDate are required";
+  }
+  const boundsError = dateBoundsError(startDate, endDate);
+  if (boundsError) return boundsError;
+
+  const start = Date.parse(`${startDate}T00:00:00Z`);
+  const end = Date.parse(`${endDate}T00:00:00Z`);
+  const days = Math.floor((end - start) / 86_400_000) + 1;
+  return days > SUMMARY_MAX_DAYS
+    ? `summary period cannot exceed ${SUMMARY_MAX_DAYS} days`
+    : null;
+}
+
+function completeDiarySummaryPeriod(startDate, endDate, populatedDays) {
+  const populatedByDate = new Map(populatedDays.map((day) => [day.date, day]));
+  const days = [];
+  const cursor = new Date(`${startDate}T00:00:00Z`);
+  const last = new Date(`${endDate}T00:00:00Z`);
+
+  while (cursor <= last) {
+    const date = cursor.toISOString().slice(0, 10);
+    days.push(populatedByDate.get(date) ?? {
+      date,
+      records: 0,
+      disturbedTimeSec: 0,
+      barks: 0,
+    });
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  const totals = days.reduce((sum, day) => ({
+    records: sum.records + day.records,
+    disturbedTimeSec: sum.disturbedTimeSec + day.disturbedTimeSec,
+    barks: sum.barks + day.barks,
+  }), { records: 0, disturbedTimeSec: 0, barks: 0 });
+
+  return { startDate, endDate, days, totals };
+}
+
 /** Parse a positive integer query field, returning null when invalid. */
 function parsePositiveInteger(value, defaultValue, max = Number.MAX_SAFE_INTEGER) {
   if (value === undefined) return defaultValue;
@@ -358,6 +401,21 @@ publicApi.get("/api/recording-context", async () => ({
 
 // Lightweight bootstrap for date-bounded clients such as the report view.
 publicApi.get("/api/diary/latest-date", async () => ({ date: getLatestDiaryDate(db) }));
+
+// Additive report metrics for every date in one inclusive period. This keeps
+// hit filtering and persisted-trim semantics on the database side so clients
+// do not need to download and aggregate hit metadata just to show totals.
+publicApi.get("/api/diary-summary", async (req, reply) => {
+  const { startDate, endDate } = req.query ?? {};
+  const boundsError = diarySummaryBoundsError(startDate, endDate);
+  if (boundsError) {
+    reply.code(400);
+    return { error: boundsError };
+  }
+
+  const populatedDays = listDiarySummaryByDate(db, { startDate, endDate });
+  return completeDiarySummaryPeriod(startDate, endDate, populatedDays);
+});
 
 // List diary entries, ordered by datetime (oldest first). Date bounds are inclusive.
 publicApi.get("/api/diary", async (req, reply) => {

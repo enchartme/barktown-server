@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { openDb, upsertSample, upsertDiaryEntry, upsertHitMetadata } from "../lib/db.mjs";
+import { openDb, setDiaryTrim, upsertSample, upsertDiaryEntry, upsertHitMetadata } from "../lib/db.mjs";
 import { startTestServer } from "./helpers/test-server.mjs";
 
 let tmpDir;
@@ -74,10 +74,16 @@ before(async () => {
       durationSec: 8,
       kind: "audio",
     });
+    const timestamps = day === "03" ? [1, 2, 5, 6] : [second];
     upsertHitMetadata(seedDb, id, {
-      timestamps: [second], confidences: [0.92], loudnesses: [1.2], paddingS: 1.5, windowS: 1.5,
+      timestamps,
+      confidences: timestamps.map(() => 0.92),
+      loudnesses: timestamps.map(() => 1.2),
+      paddingS: 1.5,
+      windowS: 1.5,
     });
     if (day === "03") {
+      setDiaryTrim(seedDb, id, { trimStartMs: 2000, trimStopMs: 6000 });
       upsertSample(seedDb, {
         id: "sample-linked",
         filename: "2026-01-03 13-14-15 SAMPLE bark.wav",
@@ -91,6 +97,18 @@ before(async () => {
       });
     }
   }
+  upsertDiaryEntry(seedDb, {
+    id: "2026-01-01_16-00-00_note",
+    filename: "2026-01-01 16-00-00 note.mp3",
+    audioPath: "audio/2026/01/2026-01-01 16-00-00 note.mp3",
+    waveformPath: null,
+    label: "note",
+    date: "2026-01-01",
+    time: "16:00",
+    datetimeLocal: "2026-01-01T16:00:00",
+    durationSec: 0,
+    kind: "note",
+  });
   // Metadata can arrive before asynchronous diary ingestion creates its row.
   upsertHitMetadata(seedDb, "orphan-clip", {
     timestamps: [4], confidences: [0.93], loudnesses: [1.3], paddingS: 1.5, windowS: 1.5,
@@ -189,6 +207,39 @@ test("GET /api/diary/latest-date returns only the newest available date", async 
   const res = await fetch(`${publicServer.baseUrl}/api/diary/latest-date`);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { date: "2026-01-04" });
+});
+
+test("GET /api/diary-summary returns inclusive daily and period totals", async () => {
+  const path = "/api/diary-summary?startDate=2026-01-01&endDate=2026-01-04";
+  const res = await fetch(`${publicServer.baseUrl}${path}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    startDate: "2026-01-01",
+    endDate: "2026-01-04",
+    days: [
+      { date: "2026-01-01", records: 0, disturbedTimeSec: 0, barks: 0 },
+      { date: "2026-01-02", records: 1, disturbedTimeSec: 8, barks: 1 },
+      { date: "2026-01-03", records: 1, disturbedTimeSec: 4, barks: 2 },
+      { date: "2026-01-04", records: 1, disturbedTimeSec: 8, barks: 1 },
+    ],
+    totals: { records: 3, disturbedTimeSec: 20, barks: 4 },
+  });
+
+  const privateRes = await fetch(`${privateServer.baseUrl}${path}`);
+  assert.equal(privateRes.status, 404);
+});
+
+test("GET /api/diary-summary requires a valid bounded period", async () => {
+  for (const query of [
+    "",
+    "startDate=2026-01-01",
+    "startDate=2026-02-30&endDate=2026-03-01",
+    "startDate=2026-01-04&endDate=2026-01-03",
+    "startDate=2000-01-01&endDate=2026-01-01",
+  ]) {
+    const res = await fetch(`${publicServer.baseUrl}/api/diary-summary?${query}`);
+    assert.equal(res.status, 400, query);
+  }
 });
 
 test("PATCH /api/diary/:id/trim persists millisecond bounds without changing duration", async () => {
