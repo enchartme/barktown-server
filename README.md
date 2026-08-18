@@ -156,6 +156,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `GET /health` | Liveness check |
 | `GET /api/monitor-params` | List Goblin monitor parameters |
 | `PUT /api/diary/:id/comment` | Add or replace the whole-recording note, using the linked sample annotation when available |
+| `PATCH /api/diary/:id/trim` | Persist or clear non-destructive `trimStartMs`/`trimStopMs` playback bounds |
 | `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
@@ -185,6 +186,11 @@ a WAV belonging to its linked training sample. New WAV ingests retain the
 archive path and ETag in SQLite; legacy normalized archive-name candidates are
 also checked. If a source is later cleaned from disk, the next diary response
 turns the indication off and the client disables the re-analysis button.
+
+Diary audio is never rewritten by trimming. SQLite stores nullable
+`trim_start_ms`/`trim_stop_ms` bounds and public diary responses expose their
+camel-case equivalents. A successful manual or bulk re-analysis scores the
+complete archived source and clears both bounds, restoring the full recording.
 
 Manual re-analysis is deterministic window reclassification, not replay of
 Goblin's callback-aligned live event state machine. It applies and records only

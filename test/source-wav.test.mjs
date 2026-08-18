@@ -5,10 +5,10 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 
-import { getDiaryEntry, openDb, upsertDiaryEntry } from "../lib/db.mjs";
+import { getDiaryEntry, openDb, setDiaryTrim, upsertDiaryEntry } from "../lib/db.mjs";
 
 
-test("openDb migrates source WAV identity and diary upserts retain it", () => {
+test("openDb migrates source identity and trim columns while diary upserts retain them", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-source-wav-test-"));
   const dbPath = path.join(tmpDir, "legacy.db");
   const legacy = new Database(dbPath);
@@ -35,6 +35,8 @@ test("openDb migrates source WAV identity and diary upserts retain it", () => {
     const columns = new Set(db.prepare("PRAGMA table_info(diary_entries)").all().map(row => row.name));
     assert.ok(columns.has("source_wav_path"));
     assert.ok(columns.has("source_wav_etag"));
+    assert.ok(columns.has("trim_start_ms"));
+    assert.ok(columns.has("trim_stop_ms"));
 
     const entry = {
       id: "clip-a",
@@ -51,11 +53,14 @@ test("openDb migrates source WAV identity and diary upserts retain it", () => {
       sourceWavEtag: "source-etag",
     };
     upsertDiaryEntry(db, entry);
+    setDiaryTrim(db, entry.id, { trimStartMs: 500, trimStopMs: 2500 });
     upsertDiaryEntry(db, { ...entry, sourceWavPath: null, sourceWavEtag: null });
 
     const stored = getDiaryEntry(db, entry.id);
     assert.equal(stored.sourceWavPath, entry.sourceWavPath);
     assert.equal(stored.sourceWavEtag, entry.sourceWavEtag);
+    assert.equal(stored.trimStartMs, 500);
+    assert.equal(stored.trimStopMs, 2500);
   } finally {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

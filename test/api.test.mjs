@@ -191,6 +191,55 @@ test("GET /api/diary/latest-date returns only the newest available date", async 
   assert.deepEqual(await res.json(), { date: "2026-01-04" });
 });
 
+test("PATCH /api/diary/:id/trim persists millisecond bounds without changing duration", async () => {
+  const path = "/api/diary/2026-01-02_13-14-15_false-positive/trim";
+  const update = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trimStartMs: 1250, trimStopMs: 6750 }),
+  });
+  assert.equal(update.status, 200);
+  assert.deepEqual(await update.json(), { trimStartMs: 1250, trimStopMs: 6750 });
+
+  const publicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
+  const entry = await publicEntry.json();
+  assert.equal(entry.durationSec, 8);
+  assert.equal(entry.trimStartMs, 1250);
+  assert.equal(entry.trimStopMs, 6750);
+
+  const reset = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trimStartMs: null, trimStopMs: null }),
+  });
+  assert.equal(reset.status, 200);
+  assert.deepEqual(await reset.json(), { trimStartMs: null, trimStopMs: null });
+});
+
+test("PATCH /api/diary/:id/trim validates bounds and stays private", async () => {
+  const path = "/api/diary/2026-01-02_13-14-15_false-positive/trim";
+  for (const bounds of [
+    { trimStartMs: -1, trimStopMs: 1000 },
+    { trimStartMs: 5000, trimStopMs: 5000 },
+    { trimStartMs: 0, trimStopMs: 8001 },
+    { trimStartMs: 1.5, trimStopMs: 1000 },
+  ]) {
+    const response = await fetch(`${privateServer.baseUrl}${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bounds),
+    });
+    assert.equal(response.status, 400, JSON.stringify(bounds));
+  }
+
+  const publicMutation = await fetch(`${publicServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trimStartMs: 1000, trimStopMs: 2000 }),
+  });
+  assert.equal(publicMutation.status, 404);
+});
+
 test("PUT /api/diary/:id/comment creates and updates an unlinked diary note", async () => {
   const url = `${privateServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/comment`;
   const create = await fetch(url, {

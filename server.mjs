@@ -53,7 +53,7 @@ import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
-  listDiaryEntries, getLatestDiaryDate, getDiaryEntry, deleteDiaryEntryRow,
+  listDiaryEntries, getLatestDiaryDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertSample,
@@ -492,6 +492,38 @@ privateApi.put("/api/diary/:id/comment", async (req, reply) => {
   return listDiaryCommentAnnotations(db, { diaryId: entry.id });
 });
 
+// Store playback/visualization bounds without modifying the source audio.
+// A null/null pair is the canonical representation of the full recording.
+privateApi.patch("/api/diary/:id/trim", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  const { trimStartMs, trimStopMs } = req.body ?? {};
+  if (trimStartMs === null && trimStopMs === null) {
+    const updated = setDiaryTrim(db, entry.id);
+    return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs };
+  }
+
+  const durationMs = Math.max(0, Math.round(entry.durationSec * 1000));
+  if (!Number.isInteger(trimStartMs) || !Number.isInteger(trimStopMs)) {
+    reply.code(400);
+    return { error: "trimStartMs and trimStopMs must be integer milliseconds" };
+  }
+  if (trimStartMs < 0 || trimStopMs <= trimStartMs || trimStopMs > durationMs) {
+    reply.code(400);
+    return { error: `trim bounds must satisfy 0 <= trimStartMs < trimStopMs <= ${durationMs}` };
+  }
+
+  const fullRecording = trimStartMs === 0 && trimStopMs === durationMs;
+  const updated = setDiaryTrim(db, entry.id, fullRecording
+    ? {}
+    : { trimStartMs, trimStopMs });
+  return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs };
+});
+
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).
 // Returns 404 if no metadata has been submitted for this clip.
 publicApi.get("/api/diary/:id/hit-metadata", async (req, reply) => {
@@ -646,9 +678,12 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
           analysisSettings: payload.analysis_settings ?? {},
           analysisTrigger: "manual",
         });
+        // Re-analysis always scores the archived full recording and makes that
+        // full range visible again after the new results have been committed.
+        setDiaryTrim(db, entry.id);
         log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
         reply.code(201);
-        return getHitMetadata(db, entry.id);
+        return { ...getHitMetadata(db, entry.id), trimStartMs: null, trimStopMs: null };
       } finally {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       }
