@@ -45,6 +45,7 @@ import {
   sourceWavKeyCandidatesForEntry,
 } from "./lib/diary-samples.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
+import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
 import {
   createReanalysisLimiter,
   ReanalysisAlreadyRunningError,
@@ -678,12 +679,18 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
           analysisSettings: payload.analysis_settings ?? {},
           analysisTrigger: "manual",
         });
-        // Re-analysis always scores the archived full recording and makes that
-        // full range visible again after the new results have been committed.
-        setDiaryTrim(db, entry.id);
+        // Analysis always runs against the complete archived source. Once its
+        // new hits are committed, show 1.5 seconds of context around the first
+        // and last hit; no hits (or a fully covered source) means no trim.
+        const automaticTrim = trimBoundsAroundHits(payload.timestamps, entry.durationSec);
+        const trimmedEntry = setDiaryTrim(db, entry.id, automaticTrim);
         log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
         reply.code(201);
-        return { ...getHitMetadata(db, entry.id), trimStartMs: null, trimStopMs: null };
+        return {
+          ...getHitMetadata(db, entry.id),
+          trimStartMs: trimmedEntry.trimStartMs,
+          trimStopMs: trimmedEntry.trimStopMs,
+        };
       } finally {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       }

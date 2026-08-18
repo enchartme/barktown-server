@@ -190,7 +190,9 @@ turns the indication off and the client disables the re-analysis button.
 Diary audio is never rewritten by trimming. SQLite stores nullable
 `trim_start_ms`/`trim_stop_ms` bounds and public diary responses expose their
 camel-case equivalents. A successful manual or bulk re-analysis scores the
-complete archived source and clears both bounds, restoring the full recording.
+complete archived source, then sets the visible range from 1.5 seconds before
+the first newly identified bark to 1.5 seconds after the last. The range is
+clamped to the source duration; a result with no barks remains untrimmed.
 
 Manual re-analysis is deterministic window reclassification, not replay of
 Goblin's callback-aligned live event state machine. It applies and records only
