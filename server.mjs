@@ -57,7 +57,7 @@ import {
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
-  upsertSample,
+  upsertSample, insertSampleIfAbsent,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
@@ -822,6 +822,29 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   const keepInDiary = Boolean(req.body?.keepInDiary);
   const diaryNote = getDiaryNote(db, entry.id);
+  const newParsed = parseSampleFilename(move.filename);
+
+  // A repeated request for the same deterministic sample id is already done.
+  // Return the link the client needs without repeating object or annotation work.
+  const existingSample = newParsed ? getSample(db, newParsed.id) : null;
+  if (existingSample && existingSample.status !== "active") {
+    reply.code(409);
+    return { error: `sample id already exists but is inactive: ${existingSample.id}` };
+  }
+  if (existingSample?.status === "active") {
+    if (existingSample.diaryId !== entry.id) {
+      reply.code(409);
+      return { error: `sample id already belongs to another recording: ${existingSample.id}` };
+    }
+    log(`Reused existing sample ${existingSample.id} for diary entry ${entry.id}`);
+    return {
+      sampleId: existingSample.id,
+      filename: existingSample.filename,
+      audioPath: existingSample.audioPath,
+      label: existingSample.label,
+      alreadyMoved: true,
+    };
+  }
 
   let sourceStat;
   let destinationStat;
@@ -851,7 +874,6 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   // Keep the diary row until every object operation succeeds. removeObject is
   // idempotent, so a request can safely resume after a partial failure.
-  const newParsed = parseSampleFilename(move.filename);
   const sampleWaveformKey = newParsed && entry.waveformPath
     ? `${CFG.samplesWavePrefix}${move.label}/${newParsed.id}.json`
     : null;
@@ -887,8 +909,12 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   // available before the ingest service processes the new WAV file.
   // The ingest service will upsert the sample later with the real durationSec.
   const hitMeta = getHitMetadata(db, entry.id);
+  let sampleCreated = false;
   if (newParsed) {
-    upsertSample(db, {
+    // Re-check after asynchronous MinIO work. Another overlapping request may
+    // have completed while this one was waiting; only its winner may populate
+    // copied notes and detector review fragments.
+    sampleCreated = insertSampleIfAbsent(db, {
       id: newParsed.id,
       filename: move.filename,
       audioPath: move.destinationKey,
@@ -899,7 +925,12 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       durationSec: entry.durationSec ?? 0,
       diaryId: entry.id,
     });
-    if (diaryNote) {
+    const overlappingSample = sampleCreated ? null : getSample(db, newParsed.id);
+    if (overlappingSample && overlappingSample.diaryId !== entry.id) {
+      reply.code(409);
+      return { error: `sample id already belongs to another recording: ${overlappingSample.id}` };
+    }
+    if (sampleCreated && diaryNote) {
       const existingWholeNote = listAnnotations(db, newParsed.id).find(annotation => (
         annotation.source === "note"
         && annotation.startSec === 0
@@ -917,7 +948,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       }
       if (keepInDiary) deleteDiaryNote(db, entry.id);
     }
-    const reviewFragments = hitMetadataReviewFragments(hitMeta);
+    const reviewFragments = sampleCreated ? hitMetadataReviewFragments(hitMeta) : [];
     if (reviewFragments.length > 0) {
       // timestamps[i] is the *end* anchor of the detection window (see
       // AudioPlayerPanel's hx comment), not the start — so the fragment
@@ -944,9 +975,11 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   log(`${keepInDiary ? 'Copied' : 'Moved'} diary entry ${entry.id} -> ${move.destinationKey}`);
   return {
+    sampleId: newParsed?.id ?? null,
     filename: move.filename,
     audioPath: move.destinationKey,
     label: move.label,
+    alreadyMoved: !sampleCreated,
   };
 });
 
