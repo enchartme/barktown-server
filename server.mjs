@@ -62,6 +62,7 @@ import {
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 import { generateWaveform } from "./lib/audio.mjs";
+import { hitMetadataReviewFragments } from "./lib/hit-annotations.mjs";
 
 const CFG = buildConfig();
 const API_MODE = process.env.BARKTOWN_API_MODE ?? "public";
@@ -120,7 +121,7 @@ async function refreshSamplesIndex() {
  *
  * Annotations double as two things, distinguished by `source`:
  *  - fragment labels (source: "manual"/"model"): startSec < endSec, label is
- *    one of the fixed training-sample categories.
+ *    a training-sample category or the non-trainable "review" state.
  *  - time-coded notes (source: "note"): a point in time (startSec === endSec
  *    is allowed), label holds the freeform note text.
  */
@@ -882,7 +883,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   if (!keepInDiary) deleteDiaryEntryRow(db, entry.id);
 
-  // Pre-create the sample row and bark fragment annotations so they're
+  // Pre-create the sample row and review fragment annotations so they're
   // available before the ingest service processes the new WAV file.
   // The ingest service will upsert the sample later with the real durationSec.
   const hitMeta = getHitMetadata(db, entry.id);
@@ -916,22 +917,16 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       }
       if (keepInDiary) deleteDiaryNote(db, entry.id);
     }
-    if (hitMeta && hitMeta.timestamps.length > 0) {
+    const reviewFragments = hitMetadataReviewFragments(hitMeta);
+    if (reviewFragments.length > 0) {
       // timestamps[i] is the *end* anchor of the detection window (see
       // AudioPlayerPanel's hx comment), not the start — so the fragment
       // must end there, with its start pushed back by the padding margin
       // goblin added around the event (config's padding_s).
-      for (let i = 0; i < hitMeta.timestamps.length; i++) {
-        const endSec = hitMeta.timestamps[i];
-        const startSec = Math.max(0, parseFloat((endSec - hitMeta.paddingS).toFixed(3)));
-        insertAnnotation(db, newParsed.id, {
-          startSec,
-          endSec: parseFloat(endSec.toFixed(3)),
-          label: "bark",
-          source: "model",
-        });
+      for (const fragment of reviewFragments) {
+        insertAnnotation(db, newParsed.id, fragment);
       }
-      log(`Created ${hitMeta.timestamps.length} bark annotation(s) for new sample ${newParsed.id}`);
+      log(`Created ${reviewFragments.length} review annotation(s) for new sample ${newParsed.id}`);
     }
   }
   if (!keepInDiary) deleteHitMetadataRow(db, entry.id);
