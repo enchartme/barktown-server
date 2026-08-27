@@ -1,15 +1,15 @@
 # barktown-server
 
-Pi-side ingest and API services for **barktown**. The ingest service watches the `upload-here/` prefix in a MinIO bucket, validates filenames, generates waveform data, organises audio into `audio/YYYY/MM/` and keeps `index.json` up to date.
+Pi-side ingest and API services for **barktown**. The ingest service watches the `upload-here/` prefix in a MinIO bucket, validates filenames, and routes diary recordings and manual training samples through separate incremental pipelines.
 
 ---
 
 ## How it works
 
-1. You upload `.m4a` or `.aac` files to `<bucket>/upload-here/`
+1. Diary audio and Goblin's manual `.wav` samples are uploaded to `<bucket>/upload-here/`
 2. The service polls that prefix every 20 s
 3. Once a file's size and ETag have been stable for 30 s (upload complete), it is processed:
-   - Filename is validated against `YYYY-MM-DD HH-MM-SS optional comment.ext`
+   - Diary filenames are validated against `YYYY-MM-DD HH-MM-SS optional comment.ext`
    - Invalid names are left in `upload-here/` untouched — rename and re-upload
    - `ffprobe` reads the duration
    - `audiowaveform` generates peak data (skipped for clips < 5 s)
@@ -17,12 +17,22 @@ Pi-side ingest and API services for **barktown**. The ingest service watches the
    - Audio is copied to `audio/YYYY/MM/<filename>` then removed from `upload-here/`
    - `index.json` is updated (appended + sorted)
 
-It also watches `training-samples/` for short labeled clips uploaded directly
-by `barktown-goblin` (mic calibration / manual bark samples). Metadata for
-those samples lives in a local SQLite database (`data/barktown.db`, see
-`lib/db.mjs`) — `training-samples-index.json` is regenerated from it after
-every update, purely so the existing barktown client can keep fetching it as
-a static file from the bucket.
+Manual Goblin recordings use `YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav`. The
+`SAMPLE` marker routes each file to an incremental training-sample ingest:
+
+- the WAV moves to `training-samples/<label>/`
+- its waveform is generated under `training-samples-waveforms/<label>/`
+- only that sample's SQLite row is upserted
+- the transient `upload-here/` object is removed after successful publication
+
+The service retains a compatibility scan for samples uploaded directly into
+`training-samples/` by older Goblin versions, but skips every object already
+represented in SQLite. This prevents retained samples from having all their
+waveforms and metadata rebuilt on subsequent polls or service restarts.
+
+Training-sample metadata lives in `data/barktown.db` (see `lib/db.mjs`). The
+small `training-samples-index.json` compatibility view is regenerated from
+SQLite after an update so existing clients can continue fetching it.
 
 Shared code (MinIO helpers, audio helpers, filename parsing) lives in `lib/`
 and is used by both `ingest-service.mjs` and the maintenance scripts.

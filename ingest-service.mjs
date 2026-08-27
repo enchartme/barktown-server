@@ -2,8 +2,8 @@
 /**
  * barktown — MinIO ingest service
  *
- * Watches the `<BUCKET>/upload-here/` prefix for freshly uploaded .m4a / .aac files.
- * For each stable, correctly-named file it:
+ * Watches the `<BUCKET>/upload-here/` prefix for diary audio and manual
+ * `... SAMPLE <label>.wav` files. For each stable, correctly-named file it:
  *   1. Validates the filename pattern  YYYY-MM-DD HH-MM-SS optional comment.ext
  *   2. Downloads the file to a temp directory
  *   3. Reads duration with ffprobe
@@ -13,7 +13,9 @@
  *   7. Removes it from      <BUCKET>/upload-here/<filename>
  *   8. Appends the entry to <BUCKET>/index.json
  *
- * Files whose names don't match the pattern are left in /upload-here/ untouched.
+ * SAMPLE files are instead moved to training-samples/<label>/, given one
+ * waveform + SQLite upsert, and removed from the inbox. Files whose names
+ * don't match either pattern are left in /upload-here/ untouched.
  *
  * ─── Configuration ────────────────────────────────────────────────────────────
  *
@@ -53,16 +55,17 @@ loadEnv(import.meta.url);
 import { buildConfig } from "./lib/config.mjs";
 import {
   createClient, listObjects, download, upload, copyObject, removeObject,
-  loadJson, saveJson,
+  objectExists, loadJson, saveJson,
 } from "./lib/minio.mjs";
 import { getDuration, convertToWav, convertWavToMp3, generateWaveform } from "./lib/audio.mjs";
 import {
   canonicalizeAutoDetectionFilename,
+  isSampleFilenameCandidate,
   parseFilename,
   parseShortFilename,
-  parseSampleFilename,
 } from "./lib/filenames.mjs";
-import { openDb, upsertSample, exportSamplesIndexJson, upsertDiaryEntry } from "./lib/db.mjs";
+import { openDb, getSample, upsertSample, exportSamplesIndexJson, upsertDiaryEntry } from "./lib/db.mjs";
+import { needsLegacySampleIngest, planSampleIngest } from "./lib/sample-ingest.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -132,8 +135,9 @@ function stableObjects(objects) {
 // Filename expected: YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
 // (produced by barktown-goblin recorder.py)
 //
-// Object key layout:
-//   training-samples/<label>/YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
+// Inbox and durable object layout:
+//   upload-here/YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
+//     -> training-samples/<label>/YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
 //   training-samples-waveforms/<label>/<id>.json
 //
 // Metadata is stored in SQLite (lib/db.mjs); training-samples-index.json is
@@ -141,7 +145,7 @@ function stableObjects(objects) {
 // the barktown client (GoblinPiStatus.svelte), which fetches it directly
 // from the public bucket.
 
-async function processTrainingSample(obj) {
+async function processTrainingSample(obj, { fromInbox = false } = {}) {
   const filename  = path.basename(obj.name);
   const objectKey = obj.name;
 
@@ -149,18 +153,40 @@ async function processTrainingSample(obj) {
   inProgressSamples.add(objectKey);
   log(`[samples] Processing: ${filename}`);
 
-  const parsed = parseSampleFilename(filename);
-  if (!parsed) {
+  const plan = planSampleIngest(filename, CFG);
+  if (!plan) {
     warn(`[samples] Filename does not match pattern — skipping: "${filename}"`);
     inProgressSamples.delete(objectKey);
     return;
   }
 
-  const { date, datetimeLocal, label, id } = parsed;
-  const [yyyy, mm] = date.split("-");
+  const { date, datetimeLocal, label, id } = plan.parsed;
+  if (plan.error) {
+    warn(`[samples] Unknown label "${label}" — leaving source untouched: "${filename}"`);
+    inProgressSamples.delete(objectKey);
+    return;
+  }
+
+  const destinationKey = fromInbox
+    ? plan.audioPath
+    : objectKey;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-sample-"));
 
   try {
+    // A prior attempt may have completed the durable copy + DB transaction but
+    // failed while deleting the inbox object. Finish that operation without
+    // regenerating the waveform.
+    if (fromInbox) {
+      const existing = getSample(db, id);
+      if (existing?.audioPath === destinationKey && await objectExists(mc, CFG.bucket, destinationKey)) {
+        await saveSamplesIndex();
+        await removeObject(mc, CFG.bucket, objectKey);
+        seenMap.delete(objectKey);
+        log(`[samples]   duplicate inbox object removed; sample already ingested (id=${id})`);
+        return;
+      }
+    }
+
     // Download WAV.
     const tmpWav = path.join(tmpDir, filename);
     await download(mc, CFG.bucket, objectKey, tmpWav);
@@ -175,7 +201,7 @@ async function processTrainingSample(obj) {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
       if (generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16, 50)) {
-        const waveformKey = `${CFG.samplesWavePrefix}${label}/${waveformFilename}`;
+        const waveformKey = plan.waveformPath;
         await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
         waveformPath = waveformKey;
         log(`[samples]   wave -> ${waveformKey}`);
@@ -184,10 +210,17 @@ async function processTrainingSample(obj) {
       }
     }
 
-    // Upsert into SQLite, then regenerate training-samples-index.json.
+    // Publish the durable sample object only after its waveform is ready.
+    if (fromInbox) {
+      await copyObject(mc, CFG.bucket, objectKey, destinationKey);
+      log(`[samples]   audio -> ${destinationKey}`);
+    }
+
+    // Upsert only this sample into SQLite, then regenerate the compatibility
+    // JSON index from DB rows (no waveform or metadata rebuild).
     const entry = {
       id, filename,
-      audioPath: objectKey,
+      audioPath: destinationKey,
       waveformPath,
       date, datetimeLocal, label,
       durationSec: parseFloat(durationSec.toFixed(3)),
@@ -197,7 +230,13 @@ async function processTrainingSample(obj) {
     await saveSamplesIndex();
     log(`[samples]   db + index updated (label=${label})`);
 
-    seenSamplesMap.delete(objectKey);
+    if (fromInbox) {
+      await removeObject(mc, CFG.bucket, objectKey);
+      seenMap.delete(objectKey);
+      log(`[samples]   removed inbox source: ${objectKey}`);
+    } else {
+      seenSamplesMap.delete(objectKey);
+    }
   } finally {
     inProgressSamples.delete(objectKey);
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -220,7 +259,12 @@ async function pollTrainingSamples() {
       return;
     }
 
-    const files = objects.filter(o => !o.name.endsWith("/") && o.size > 0);
+    const files = objects.filter(o => {
+      if (o.name.endsWith("/") || o.size <= 0) return false;
+      const plan = planSampleIngest(path.basename(o.name), CFG);
+      const existing = plan ? getSample(db, plan.parsed.id) : null;
+      return needsLegacySampleIngest(o.name, plan, existing);
+    });
     if (files.length === 0) return;
 
     // Stability tracking (reuses the same logic, separate map).
@@ -260,6 +304,13 @@ async function pollTrainingSamples() {
 async function processFile(obj) {
   const filename  = path.basename(obj.name);
   const objectKey = obj.name;
+
+  // SAMPLE is an ingest routing marker, not a diary label. Handle this before
+  // the general filename parser (which intentionally accepts free-form diary
+  // comments and would otherwise ingest it as an ordinary recording).
+  if (isSampleFilenameCandidate(filename)) {
+    return processTrainingSample(obj, { fromInbox: true });
+  }
 
   if (inProgress.has(objectKey)) {
     return; // already being handled by a concurrent poll tick
