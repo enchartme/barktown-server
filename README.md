@@ -148,9 +148,11 @@ npm run server:private
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
 | `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
 | `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
+| `GET /api/diary/:id/data-quality` | Get timeboxed capture-integrity and XRUN facts for one recording |
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
+| `GET /api/samples/:id/data-quality` | Get capture-integrity facts retained with a moved sample |
 | `GET /api/annotations` | List every annotation across all samples in one request (includes each annotation's sample `audioPath`/`durationSec`) — for laptop-side training export tooling |
 
 Public responses send `Cache-Control: no-store`; filtering and freshness come
@@ -169,6 +171,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `PATCH /api/diary/:id/trim` | Persist or clear non-destructive `trimStartMs`/`trimStopMs` playback bounds |
 | `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
+| `POST /api/diary/:id/data-quality` | Upsert Goblin's timeboxed capture-integrity and XRUN facts |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
 | `DELETE /api/diary/:id` | Delete a diary entry |
 | `POST /api/diary/:id/move-to-samples` | Publish a diary recording and waveform as a training sample |
@@ -418,6 +421,11 @@ YYYY-MM-DD HH-MM-SS optional comment.aac
 Automatically detected clips use the stable marker-only form below. Detection
 confidence, density, hit count, and loudness are stored in `hit_metadata` and
 must not be embedded in filenames or IDs.
+
+Capture integrity is stored separately in `data_quality`, keyed by the same
+record ID. It records the exact half-open recording interval `[start, end)`,
+XRUN totals and reason counts, plus a bounded JSON list of XRUN offsets and
+PortAudio details. PortAudio reports incidents, not the number of samples lost.
 
 ```text
 YYYY-MM-DD HH-MM-SS -A-.wav

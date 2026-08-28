@@ -57,6 +57,7 @@ import {
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
+  upsertDataQuality, getDataQuality, deleteDataQualityRow, moveDataQualityRecord,
   upsertSample, insertSampleIfAbsent,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
@@ -225,6 +226,94 @@ function validateHitMetadataPayload(payload, { requireProvenance = false } = {})
     if (analysisTrigger !== "manual") {
       return "analysis_trigger from the offline analyzer must be manual";
     }
+  }
+  return null;
+}
+
+const DATA_QUALITY_COUNT_FIELDS = [
+  "xrun_count",
+  "input_overflow_count",
+  "input_underflow_count",
+  "output_overflow_count",
+  "output_underflow_count",
+  "other_xrun_count",
+  "errors_truncated",
+];
+const XRUN_REASONS = new Set([
+  "input_overflow",
+  "input_underflow",
+  "output_overflow",
+  "output_underflow",
+  "other",
+]);
+
+/** Validate capture integrity facts and enforce their recording timebox. */
+function validateDataQualityPayload(payload) {
+  const start = payload?.recording_started_at;
+  const end = payload?.recording_ended_at;
+  const durationS = payload?.duration_s;
+  const errors = payload?.errors;
+  const validTimestamp = value => (
+    typeof value === "string"
+    && /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && !Number.isNaN(Date.parse(value))
+  );
+  if (!validTimestamp(start) || !validTimestamp(end)) {
+    return "recording_started_at and recording_ended_at must be ISO-8601 timestamps with timezones";
+  }
+  const measuredDurationS = (Date.parse(end) - Date.parse(start)) / 1000;
+  if (measuredDurationS < 0) return "recording_ended_at must not precede recording_started_at";
+  if (typeof durationS !== "number" || !Number.isFinite(durationS) || durationS < 0) {
+    return "duration_s must be a non-negative finite number";
+  }
+  if (Math.abs(durationS - measuredDurationS) > 0.01) {
+    return "duration_s must match the recording timestamp interval";
+  }
+  for (const field of DATA_QUALITY_COUNT_FIELDS) {
+    if (!Number.isSafeInteger(payload?.[field]) || payload[field] < 0) {
+      return `${field} must be a non-negative integer`;
+    }
+  }
+  if (!Array.isArray(errors) || errors.length > 1000) {
+    return "errors must be an array with at most 1000 entries";
+  }
+  for (const error of errors) {
+    if (!error || error.type !== "xrun") return "every error must have type xrun";
+    if (
+      typeof error.offset_ms !== "number"
+      || !Number.isFinite(error.offset_ms)
+      || error.offset_ms < 0
+      || error.offset_ms >= durationS * 1000
+    ) {
+      return "every error offset_ms must fall inside the recording interval";
+    }
+    if (
+      !Array.isArray(error.reasons)
+      || error.reasons.length === 0
+      || !error.reasons.every(reason => XRUN_REASONS.has(reason))
+    ) {
+      return "every xrun error must contain known reason codes";
+    }
+    if (typeof error.detail !== "string" || error.detail.length > 500) {
+      return "every error detail must be a string of at most 500 characters";
+    }
+  }
+  if (payload.xrun_count !== errors.length + payload.errors_truncated) {
+    return "xrun_count must equal stored errors plus errors_truncated";
+  }
+  const reasonFields = [
+    "input_overflow_count",
+    "input_underflow_count",
+    "output_overflow_count",
+    "output_underflow_count",
+    "other_xrun_count",
+  ];
+  if (reasonFields.some(field => payload[field] > payload.xrun_count)) {
+    return "an individual xrun reason count cannot exceed xrun_count";
+  }
+  const reasonTotal = reasonFields.reduce((sum, field) => sum + payload[field], 0);
+  if (reasonTotal < payload.xrun_count) {
+    return "xrun reason counts must cover every xrun";
   }
   return null;
 }
@@ -661,6 +750,42 @@ privateApi.post("/api/diary/:id/hit-metadata", async (req, reply) => {
   return getHitMetadata(db, clipId);
 });
 
+// Capture integrity is independent of classifier hit metadata and is posted
+// immediately after Goblin has published the corresponding audio object.
+publicApi.get("/api/diary/:id/data-quality", async (req, reply) => {
+  const quality = getDataQuality(db, canonicalizeAutoDetectionId(req.params.id));
+  if (!quality) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+  return quality;
+});
+
+privateApi.post("/api/diary/:id/data-quality", async (req, reply) => {
+  const payload = req.body ?? {};
+  const error = validateDataQualityPayload(payload);
+  if (error) {
+    reply.code(400);
+    return { error };
+  }
+  const recordId = canonicalizeAutoDetectionId(req.params.id);
+  upsertDataQuality(db, recordId, {
+    recordingStartedAt: payload.recording_started_at,
+    recordingEndedAt: payload.recording_ended_at,
+    durationS: payload.duration_s,
+    xrunCount: payload.xrun_count,
+    inputOverflowCount: payload.input_overflow_count,
+    inputUnderflowCount: payload.input_underflow_count,
+    outputOverflowCount: payload.output_overflow_count,
+    outputUnderflowCount: payload.output_underflow_count,
+    otherXrunCount: payload.other_xrun_count,
+    errors: payload.errors,
+    errorsTruncated: payload.errors_truncated,
+  });
+  reply.code(201);
+  return getDataQuality(db, recordId);
+});
+
 // ─── Monitor params (single source of truth for barktown-goblin's bark-monitor
 // tuning, also used as this API's reanalyze defaults) ─────────────────────────
 
@@ -811,6 +936,8 @@ privateApi.delete("/api/diary/:id", async (req, reply) => {
     }
   }
 
+  if (entry.sampleId) moveDataQualityRecord(db, entry.id, entry.sampleId);
+  else deleteDataQualityRow(db, entry.id);
   deleteDiaryEntryRow(db, entry.id);
   deleteHitMetadataRow(db, entry.id);
 
@@ -971,6 +1098,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   // The sample is now complete and visible. Finish the destructive half of a
   // move last; leftover source objects are harmless and cleanup is retry-safe.
   if (!keepInDiary) {
+    moveDataQualityRecord(db, entry.id, move.sampleId);
     deleteDiaryEntryRow(db, entry.id);
     deleteHitMetadataRow(db, entry.id);
     for (const objectKey of new Set([entry.audioPath, entry.waveformPath, move.sourceKey].filter(Boolean))) {
@@ -1070,6 +1198,21 @@ publicApi.get("/api/samples/:id/annotations", async (req, reply) => {
   return listAnnotations(db, req.params.id);
 });
 
+publicApi.get("/api/samples/:id/data-quality", async (req, reply) => {
+  const sample = getSample(db, req.params.id);
+  if (!sample || sample.status !== "active") {
+    reply.code(404);
+    return { error: "not found" };
+  }
+  const quality = getDataQuality(db, sample.id)
+    ?? (sample.diaryId ? getDataQuality(db, sample.diaryId) : null);
+  if (!quality) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+  return quality;
+});
+
 // All annotations across all active samples, in one request — for laptop-side
 // training export tools (tools/export_fragments.py in barktown-goblin) that
 // need to sync the whole corpus without one request per sample.
@@ -1102,6 +1245,7 @@ privateApi.delete("/api/samples/:id", async (req, reply) => {
   }
 
   deleteSampleRow(db, sample.id);
+  deleteDataQualityRow(db, sample.id);
   await refreshSamplesIndex();
   log(`Deleted sample ${sample.id}`);
 
@@ -1165,6 +1309,7 @@ privateApi.patch("/api/samples/:id", async (req, reply) => {
     datetimeLocal: parsedNew.datetimeLocal,
     durationSec: sample.durationSec,
   });
+  moveDataQualityRecord(db, sample.id, parsedNew.id);
   await refreshSamplesIndex();
   log(`Renamed sample ${sample.id} -> ${parsedNew.id} (label: ${sample.label} -> ${newLabel})`);
 

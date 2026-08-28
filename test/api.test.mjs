@@ -479,6 +479,69 @@ test("POST /api/diary/:id/hit-metadata validates provenance fields", async () =>
   }
 });
 
+test("POST /api/diary/:id/data-quality stores strictly timeboxed XRUN facts", async () => {
+  const payload = {
+    recording_started_at: "2026-01-02T13:14:14.000Z",
+    recording_ended_at: "2026-01-02T13:14:16.000Z",
+    duration_s: 2,
+    xrun_count: 1,
+    input_overflow_count: 1,
+    input_underflow_count: 0,
+    output_overflow_count: 0,
+    output_underflow_count: 0,
+    other_xrun_count: 0,
+    errors: [{
+      type: "xrun",
+      offset_ms: 750,
+      reasons: ["input_overflow"],
+      detail: "input overflow",
+    }],
+    errors_truncated: 0,
+  };
+  const post = await fetch(`${privateServer.baseUrl}/api/diary/quality-test/data-quality`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  assert.equal(post.status, 201);
+  const stored = await post.json();
+  assert.equal(stored.recordId, "quality-test");
+  assert.equal(stored.xrunCount, 1);
+  assert.equal(stored.inputOverflowCount, 1);
+  assert.deepEqual(stored.errors, payload.errors);
+
+  const get = await fetch(`${publicServer.baseUrl}/api/diary/quality-test/data-quality`);
+  assert.equal(get.status, 200);
+  assert.equal((await get.json()).durationS, 2);
+});
+
+test("POST /api/diary/:id/data-quality rejects events at the exclusive clip end", async () => {
+  const response = await fetch(`${privateServer.baseUrl}/api/diary/invalid-quality/data-quality`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recording_started_at: "2026-01-02T13:14:14.000Z",
+      recording_ended_at: "2026-01-02T13:14:16.000Z",
+      duration_s: 2,
+      xrun_count: 1,
+      input_overflow_count: 1,
+      input_underflow_count: 0,
+      output_overflow_count: 0,
+      output_underflow_count: 0,
+      other_xrun_count: 0,
+      errors: [{
+        type: "xrun",
+        offset_ms: 2000,
+        reasons: ["input_overflow"],
+        detail: "outside",
+      }],
+      errors_truncated: 0,
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /inside the recording interval/);
+});
+
 test("POST /api/diary/:id/move-to-samples rejects labels outside the taxonomy", async () => {
   const res = await fetch(`${privateServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/move-to-samples`, {
     method: "POST",
