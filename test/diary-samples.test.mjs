@@ -14,6 +14,7 @@ const cfg = {
   audioPrefix: "audio/",
   archivePrefix: "uncompressed-uploads-archive/",
   samplesPrefix: "training-samples/",
+  samplesWavePrefix: "training-samples-waveforms/",
 };
 
 const entry = {
@@ -25,8 +26,10 @@ test("buildDiarySampleMove maps an archived WAV to the selected sample label", (
   assert.deepEqual(buildDiarySampleMove(entry, "background", cfg), {
     label: "background",
     filename: "2026-06-07 21-54-03 SAMPLE background.wav",
+    sampleId: "2026-06-07_21-54-03_SAMPLE_background",
     sourceKey: "uncompressed-uploads-archive/2026/06/2026-06-07 21-54-03 barking.wav",
     destinationKey: "training-samples/background/2026-06-07 21-54-03 SAMPLE background.wav",
+    waveformKey: "training-samples-waveforms/background/2026-06-07_21-54-03_SAMPLE_background.json",
   });
 });
 

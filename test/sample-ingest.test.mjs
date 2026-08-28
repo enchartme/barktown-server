@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { needsLegacySampleIngest, planSampleIngest } from "../lib/sample-ingest.mjs";
+import { planSampleIngest } from "../lib/sample-ingest.mjs";
 import { isSampleFilenameCandidate } from "../lib/filenames.mjs";
 
 const cfg = {
@@ -32,17 +32,4 @@ test("malformed files with the reserved SAMPLE marker cannot fall through to dia
   const filename = "2026-08-27 12-34-56 SAMPLE bark extra.wav";
   assert.equal(isSampleFilenameCandidate(filename), true);
   assert.equal(planSampleIngest(filename, cfg), null);
-});
-
-test("legacy sample scan skips objects already represented by the database", () => {
-  const filename = "2026-08-27 12-34-56 SAMPLE bark.wav";
-  const objectKey = `training-samples/bark/${filename}`;
-  const plan = planSampleIngest(filename, cfg);
-
-  assert.equal(needsLegacySampleIngest(objectKey, plan, { audioPath: objectKey }), false);
-  assert.equal(needsLegacySampleIngest(objectKey, plan, null), true);
-  assert.equal(
-    needsLegacySampleIngest(objectKey, plan, { audioPath: "training-samples/bark/other.wav" }),
-    true,
-  );
 });

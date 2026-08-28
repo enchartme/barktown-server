@@ -65,7 +65,7 @@ import {
   parseShortFilename,
 } from "./lib/filenames.mjs";
 import { openDb, getSample, upsertSample, exportSamplesIndexJson, upsertDiaryEntry } from "./lib/db.mjs";
-import { needsLegacySampleIngest, planSampleIngest } from "./lib/sample-ingest.mjs";
+import { planSampleIngest } from "./lib/sample-ingest.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -98,11 +98,10 @@ async function saveSamplesIndex() {
 // A file is considered "stable" (upload complete) when its etag+size has not
 // changed for at least STABILITY_DELAY_MS milliseconds.
 
-const seenMap        = new Map();
-const seenSamplesMap = new Map();
+const seenMap = new Map();
 
 /** Keys currently being processed — prevents duplicate concurrent work. */
-const inProgress        = new Set();
+const inProgress = new Set();
 const inProgressSamples = new Set();
 
 function updateSeen(objects) {
@@ -145,7 +144,7 @@ function stableObjects(objects) {
 // the barktown client (GoblinPiStatus.svelte), which fetches it directly
 // from the public bucket.
 
-async function processTrainingSample(obj, { fromInbox = false } = {}) {
+async function processTrainingSample(obj) {
   const filename  = path.basename(obj.name);
   const objectKey = obj.name;
 
@@ -167,24 +166,24 @@ async function processTrainingSample(obj, { fromInbox = false } = {}) {
     return;
   }
 
-  const destinationKey = fromInbox
-    ? plan.audioPath
-    : objectKey;
+  const destinationKey = plan.audioPath;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-sample-"));
 
   try {
     // A prior attempt may have completed the durable copy + DB transaction but
     // failed while deleting the inbox object. Finish that operation without
     // regenerating the waveform.
-    if (fromInbox) {
-      const existing = getSample(db, id);
-      if (existing?.audioPath === destinationKey && await objectExists(mc, CFG.bucket, destinationKey)) {
-        await saveSamplesIndex();
-        await removeObject(mc, CFG.bucket, objectKey);
-        seenMap.delete(objectKey);
-        log(`[samples]   duplicate inbox object removed; sample already ingested (id=${id})`);
-        return;
-      }
+    const existing = getSample(db, id);
+    const alreadyComplete = existing?.audioPath === destinationKey
+      && existing.waveformPath === plan.waveformPath
+      && await objectExists(mc, CFG.bucket, destinationKey)
+      && await objectExists(mc, CFG.bucket, plan.waveformPath);
+    if (alreadyComplete) {
+      await saveSamplesIndex();
+      await removeObject(mc, CFG.bucket, objectKey);
+      seenMap.delete(objectKey);
+      log(`[samples]   duplicate inbox object removed; sample already ingested (id=${id})`);
+      return;
     }
 
     // Download WAV.
@@ -196,25 +195,18 @@ async function processTrainingSample(obj, { fromInbox = false } = {}) {
     log(`[samples]   duration: ${durationSec.toFixed(2)}s  label: ${label}`);
 
     // Waveform (always generated — samples are short enough to be worth it).
-    let waveformPath = null;
-    if (durationSec >= 1) {
-      const waveformFilename = `${id}.json`;
-      const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      if (generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16, 50)) {
-        const waveformKey = plan.waveformPath;
-        await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
-        waveformPath = waveformKey;
-        log(`[samples]   wave -> ${waveformKey}`);
-      } else {
-        warn(`[samples]   waveform skipped (audiowaveform failed)`);
-      }
+    const waveformFilename = `${id}.json`;
+    const tmpWaveform      = path.join(tmpDir, waveformFilename);
+    if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16, 50)) {
+      throw new Error("audiowaveform failed; sample left in upload-here");
     }
+    const waveformPath = plan.waveformPath;
+    await upload(mc, CFG.bucket, tmpWaveform, waveformPath, "application/json");
+    log(`[samples]   wave -> ${waveformPath}`);
 
     // Publish the durable sample object only after its waveform is ready.
-    if (fromInbox) {
-      await copyObject(mc, CFG.bucket, objectKey, destinationKey);
-      log(`[samples]   audio -> ${destinationKey}`);
-    }
+    await copyObject(mc, CFG.bucket, objectKey, destinationKey);
+    log(`[samples]   audio -> ${destinationKey}`);
 
     // Upsert only this sample into SQLite, then regenerate the compatibility
     // JSON index from DB rows (no waveform or metadata rebuild).
@@ -230,72 +222,12 @@ async function processTrainingSample(obj, { fromInbox = false } = {}) {
     await saveSamplesIndex();
     log(`[samples]   db + index updated (label=${label})`);
 
-    if (fromInbox) {
-      await removeObject(mc, CFG.bucket, objectKey);
-      seenMap.delete(objectKey);
-      log(`[samples]   removed inbox source: ${objectKey}`);
-    } else {
-      seenSamplesMap.delete(objectKey);
-    }
+    await removeObject(mc, CFG.bucket, objectKey);
+    seenMap.delete(objectKey);
+    log(`[samples]   removed inbox source: ${objectKey}`);
   } finally {
     inProgressSamples.delete(objectKey);
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-// ─── Poll loop — training samples ────────────────────────────────────────────
-
-let _pollingSamples = false;
-
-async function pollTrainingSamples() {
-  if (_pollingSamples) return;
-  _pollingSamples = true;
-  try {
-    let objects;
-    try {
-      objects = await listObjects(mc, CFG.bucket, CFG.samplesPrefix);
-    } catch (e) {
-      err(`[samples] listObjects failed: ${e.message}`);
-      return;
-    }
-
-    const files = objects.filter(o => {
-      if (o.name.endsWith("/") || o.size <= 0) return false;
-      const plan = planSampleIngest(path.basename(o.name), CFG);
-      const existing = plan ? getSample(db, plan.parsed.id) : null;
-      return needsLegacySampleIngest(o.name, plan, existing);
-    });
-    if (files.length === 0) return;
-
-    // Stability tracking (reuses the same logic, separate map).
-    const now = Date.now();
-    const liveKeys = new Set(files.map(o => o.name));
-    for (const key of seenSamplesMap.keys()) {
-      if (!liveKeys.has(key)) seenSamplesMap.delete(key);
-    }
-    for (const obj of files) {
-      const prev    = seenSamplesMap.get(obj.name);
-      const changed = !prev || prev.etag !== obj.etag || prev.size !== obj.size;
-      if (changed) seenSamplesMap.set(obj.name, { etag: obj.etag, size: obj.size, stableAt: now });
-    }
-
-    const threshold = now - CFG.stabilityDelayMs;
-    const ready = files.filter(obj => {
-      const seen = seenSamplesMap.get(obj.name);
-      return seen && seen.stableAt <= threshold && !inProgressSamples.has(obj.name);
-    });
-    if (ready.length === 0) return;
-
-    log(`[samples] ${ready.length} stable file(s) ready.`);
-    for (const obj of ready) {
-      try {
-        await processTrainingSample(obj);
-      } catch (e) {
-        err(`[samples] Failed to process "${obj.name}": ${e.message}`);
-      }
-    }
-  } finally {
-    _pollingSamples = false;
   }
 }
 
@@ -309,7 +241,7 @@ async function processFile(obj) {
   // the general filename parser (which intentionally accepts free-form diary
   // comments and would otherwise ingest it as an ordinary recording).
   if (isSampleFilenameCandidate(filename)) {
-    return processTrainingSample(obj, { fromInbox: true });
+    return processTrainingSample(obj);
   }
 
   if (inProgress.has(objectKey)) {
@@ -572,9 +504,7 @@ async function main() {
   }
 
   await poll();
-  await pollTrainingSamples();
   setInterval(poll, CFG.pollIntervalMs);
-  setInterval(pollTrainingSamples, CFG.pollIntervalMs);
 }
 
 main().catch(e => { err(e); process.exit(1); });

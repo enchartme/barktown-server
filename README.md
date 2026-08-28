@@ -25,10 +25,9 @@ Manual Goblin recordings use `YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav`. The
 - only that sample's SQLite row is upserted
 - the transient `upload-here/` object is removed after successful publication
 
-The service retains a compatibility scan for samples uploaded directly into
-`training-samples/` by older Goblin versions, but skips every object already
-represented in SQLite. This prevents retained samples from having all their
-waveforms and metadata rebuilt on subsequent polls or service restarts.
+The ingest service watches only `upload-here/`. The durable
+`training-samples/` and `training-samples-waveforms/` prefixes are outputs,
+never ingest queues, so existing samples cannot be rebuilt by a poll cycle.
 
 Training-sample metadata lives in `data/barktown.db` (see `lib/db.mjs`). The
 small `training-samples-index.json` compatibility view is regenerated from
@@ -172,7 +171,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
 | `DELETE /api/diary/:id` | Delete a diary entry |
-| `POST /api/diary/:id/move-to-samples` | Copy/move a diary recording into training samples |
+| `POST /api/diary/:id/move-to-samples` | Publish a diary recording and waveform as a training sample |
 | `POST /api/samples/:id/regenerate-waveform` | Regenerate a training-sample waveform |
 | `DELETE /api/samples/:id` | Delete a sample (MinIO objects + DB row) |
 | `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |

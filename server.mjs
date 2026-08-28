@@ -352,6 +352,32 @@ async function findSourceWav(entry) {
   return null;
 }
 
+/** Ensure a training sample has a published waveform before exposing its DB row. */
+async function ensureSampleWaveform({ sourceWaveformKey, audioKey, waveformKey, sampleId }) {
+  if (await statObjectIfExists(waveformKey)) return;
+
+  if (sourceWaveformKey && await statObjectIfExists(sourceWaveformKey)) {
+    await copyObject(mc, CFG.bucket, sourceWaveformKey, waveformKey);
+  } else {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-sample-waveform-"));
+    try {
+      const tmpAudio = path.join(tmpDir, path.basename(audioKey));
+      const tmpWaveform = path.join(tmpDir, `${sampleId}.json`);
+      await download(mc, CFG.bucket, audioKey, tmpAudio);
+      if (!generateWaveform(CFG.audiowaveformBin, tmpAudio, tmpWaveform, 16, 50)) {
+        throw new Error("audiowaveform failed");
+      }
+      await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  if (!await statObjectIfExists(waveformKey)) {
+    throw new Error(`waveform was not published: ${waveformKey}`);
+  }
+}
+
 /** Add a live reanalyzable indication without exposing internal MinIO paths. */
 function publicDiaryEntry(entry, availableKeys, annotations = []) {
   const sourcePath = availableSourceWavPath(entry, CFG, availableKeys);
@@ -801,10 +827,9 @@ privateApi.delete("/api/diary/:id", async (req, reply) => {
   return reply.code(204).send();
 });
 
-// Turn a false-positive diary recording into a labeled training sample.
-// The sample is copied from the original, uncompressed WAV archive; the
-// ingest service will notice the new training-samples/ object, generate its
-// waveform, and populate the samples database in its normal poll cycle.
+// Turn a diary recording into a labeled training sample. This route publishes
+// the WAV, waveform, and SQLite row itself; training-samples/ is an output
+// prefix and is never watched by the ingest service.
 privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
@@ -822,11 +847,11 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   const keepInDiary = Boolean(req.body?.keepInDiary);
   const diaryNote = getDiaryNote(db, entry.id);
-  const newParsed = parseSampleFilename(move.filename);
+  const hitMeta = getHitMetadata(db, entry.id);
 
-  // A repeated request for the same deterministic sample id is already done.
-  // Return the link the client needs without repeating object or annotation work.
-  const existingSample = newParsed ? getSample(db, newParsed.id) : null;
+  // A repeated request may be finishing a partial attempt, so validate the
+  // identity but continue through object verification and diary cleanup.
+  const existingSample = getSample(db, move.sampleId);
   if (existingSample && existingSample.status !== "active") {
     reply.code(409);
     return { error: `sample id already exists but is inactive: ${existingSample.id}` };
@@ -836,14 +861,10 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       reply.code(409);
       return { error: `sample id already belongs to another recording: ${existingSample.id}` };
     }
-    log(`Reused existing sample ${existingSample.id} for diary entry ${entry.id}`);
-    return {
-      sampleId: existingSample.id,
-      filename: existingSample.filename,
-      audioPath: existingSample.audioPath,
-      label: existingSample.label,
-      alreadyMoved: true,
-    };
+    if (existingSample.audioPath !== move.destinationKey) {
+      reply.code(409);
+      return { error: `sample id points at a different audio object: ${existingSample.audioPath}` };
+    }
   }
 
   let sourceStat;
@@ -872,95 +893,94 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
     return { error: `original WAV not found: ${move.sourceKey}` };
   }
 
-  // Keep the diary row until every object operation succeeds. removeObject is
-  // idempotent, so a request can safely resume after a partial failure.
-  const sampleWaveformKey = newParsed && entry.waveformPath
-    ? `${CFG.samplesWavePrefix}${move.label}/${newParsed.id}.json`
-    : null;
+  // Publish and verify both durable sample assets before changing SQLite or
+  // deleting anything from the diary. A missing diary waveform is regenerated
+  // synchronously from the copied source WAV.
   try {
-    if (!keepInDiary) {
-      await removeObject(mc, CFG.bucket, entry.audioPath);
-      if (entry.waveformPath) await removeObject(mc, CFG.bucket, entry.waveformPath);
-    }
-
     if (sourceStat && !destinationStat) {
       await copyObject(mc, CFG.bucket, move.sourceKey, move.destinationKey);
     }
-    if (sourceStat && !keepInDiary) await removeObject(mc, CFG.bucket, move.sourceKey);
-
-    // Copy the diary waveform to the training-samples-waveforms path so it
-    // is available immediately without waiting for the ingest service.
-    if (sampleWaveformKey && entry.waveformPath) {
-      try {
-        await copyObject(mc, CFG.bucket, entry.waveformPath, sampleWaveformKey);
-      } catch (e) {
-        warn(`move diary to samples: could not copy waveform for ${entry.id}: ${e.message}`);
-      }
+    if (!await statObjectIfExists(move.destinationKey)) {
+      throw new Error(`sample audio was not published: ${move.destinationKey}`);
     }
-  } catch (e) {
-    err(`move diary to samples: MinIO mutation failed for ${entry.id}: ${e.message}`);
-    reply.code(502);
-    return { error: `failed to move recording in MinIO: ${e.message}` };
-  }
-
-  if (!keepInDiary) deleteDiaryEntryRow(db, entry.id);
-
-  // Pre-create the sample row and review fragment annotations so they're
-  // available before the ingest service processes the new WAV file.
-  // The ingest service will upsert the sample later with the real durationSec.
-  const hitMeta = getHitMetadata(db, entry.id);
-  let sampleCreated = false;
-  if (newParsed) {
-    // Re-check after asynchronous MinIO work. Another overlapping request may
-    // have completed while this one was waiting; only its winner may populate
-    // copied notes and detector review fragments.
-    sampleCreated = insertSampleIfAbsent(db, {
-      id: newParsed.id,
-      filename: move.filename,
-      audioPath: move.destinationKey,
-      waveformPath: sampleWaveformKey,
-      label: move.label,
-      date: newParsed.date,
-      datetimeLocal: newParsed.datetimeLocal,
-      durationSec: entry.durationSec ?? 0,
-      diaryId: entry.id,
+    await ensureSampleWaveform({
+      sourceWaveformKey: entry.waveformPath,
+      audioKey: move.destinationKey,
+      waveformKey: move.waveformKey,
+      sampleId: move.sampleId,
     });
-    const overlappingSample = sampleCreated ? null : getSample(db, newParsed.id);
-    if (overlappingSample && overlappingSample.diaryId !== entry.id) {
-      reply.code(409);
-      return { error: `sample id already belongs to another recording: ${overlappingSample.id}` };
+  } catch (e) {
+    err(`move diary to samples: asset publication failed for ${entry.id}: ${e.message}`);
+    reply.code(502);
+    return { error: `failed to publish sample assets in MinIO: ${e.message}` };
+  }
+
+  // Create the sample row only after audio and waveform are both available.
+  const parsedSample = parseSampleFilename(move.filename);
+  const sampleCreated = insertSampleIfAbsent(db, {
+    id: move.sampleId,
+    filename: move.filename,
+    audioPath: move.destinationKey,
+    waveformPath: move.waveformKey,
+    label: move.label,
+    date: parsedSample.date,
+    datetimeLocal: parsedSample.datetimeLocal,
+    durationSec: entry.durationSec ?? 0,
+    diaryId: entry.id,
+  });
+  const storedSample = getSample(db, move.sampleId);
+  if (!storedSample || storedSample.diaryId !== entry.id) {
+    reply.code(409);
+    return { error: `sample id already belongs to another recording: ${move.sampleId}` };
+  }
+  if (!sampleCreated && storedSample.waveformPath !== move.waveformKey) {
+    upsertSample(db, { ...storedSample, waveformPath: move.waveformKey });
+  }
+
+  // Only the request that created the deterministic sample row may copy
+  // annotations; retries then remain idempotent.
+  if (sampleCreated && diaryNote) {
+    const existingWholeNote = listAnnotations(db, move.sampleId).find(annotation => (
+      annotation.source === "note"
+      && annotation.startSec === 0
+      && annotation.endSec === 0
+    ));
+    if (existingWholeNote) {
+      updateAnnotation(db, existingWholeNote.id, { label: diaryNote.label });
+    } else {
+      insertAnnotation(db, move.sampleId, {
+        startSec: 0,
+        endSec: 0,
+        label: diaryNote.label,
+        source: "note",
+      });
     }
-    if (sampleCreated && diaryNote) {
-      const existingWholeNote = listAnnotations(db, newParsed.id).find(annotation => (
-        annotation.source === "note"
-        && annotation.startSec === 0
-        && annotation.endSec === 0
-      ));
-      if (existingWholeNote) {
-        updateAnnotation(db, existingWholeNote.id, { label: diaryNote.label });
-      } else {
-        insertAnnotation(db, newParsed.id, {
-          startSec: 0,
-          endSec: 0,
-          label: diaryNote.label,
-          source: "note",
-        });
-      }
-      if (keepInDiary) deleteDiaryNote(db, entry.id);
+    if (keepInDiary) deleteDiaryNote(db, entry.id);
+  }
+  const reviewFragments = sampleCreated ? hitMetadataReviewFragments(hitMeta) : [];
+  if (reviewFragments.length > 0) {
+    // timestamps[i] is the end anchor of the detection window, so the
+    // fragment starts one padding margin before it.
+    for (const fragment of reviewFragments) {
+      insertAnnotation(db, move.sampleId, fragment);
     }
-    const reviewFragments = sampleCreated ? hitMetadataReviewFragments(hitMeta) : [];
-    if (reviewFragments.length > 0) {
-      // timestamps[i] is the *end* anchor of the detection window (see
-      // AudioPlayerPanel's hx comment), not the start — so the fragment
-      // must end there, with its start pushed back by the padding margin
-      // goblin added around the event (config's padding_s).
-      for (const fragment of reviewFragments) {
-        insertAnnotation(db, newParsed.id, fragment);
+    log(`Created ${reviewFragments.length} review annotation(s) for new sample ${move.sampleId}`);
+  }
+  await refreshSamplesIndex();
+
+  // The sample is now complete and visible. Finish the destructive half of a
+  // move last; leftover source objects are harmless and cleanup is retry-safe.
+  if (!keepInDiary) {
+    deleteDiaryEntryRow(db, entry.id);
+    deleteHitMetadataRow(db, entry.id);
+    for (const objectKey of new Set([entry.audioPath, entry.waveformPath, move.sourceKey].filter(Boolean))) {
+      try {
+        await removeObject(mc, CFG.bucket, objectKey);
+      } catch (e) {
+        warn(`move diary to samples: could not remove source object "${objectKey}": ${e.message}`);
       }
-      log(`Created ${reviewFragments.length} review annotation(s) for new sample ${newParsed.id}`);
     }
   }
-  if (!keepInDiary) deleteHitMetadataRow(db, entry.id);
 
   // Best-effort legacy index maintenance; SQLite is the diary source of truth.
   if (!keepInDiary) {
@@ -975,9 +995,10 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   log(`${keepInDiary ? 'Copied' : 'Moved'} diary entry ${entry.id} -> ${move.destinationKey}`);
   return {
-    sampleId: newParsed?.id ?? null,
+    sampleId: move.sampleId,
     filename: move.filename,
     audioPath: move.destinationKey,
+    waveformPath: move.waveformKey,
     label: move.label,
     alreadyMoved: !sampleCreated,
   };
