@@ -57,7 +57,7 @@ import {
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
-  upsertDataQuality, getDataQuality, deleteDataQualityRow, moveDataQualityRecord,
+  upsertDataQuality, getDataQuality, listDataQualityPage, deleteDataQualityRow, moveDataQualityRecord,
   upsertSample, insertSampleIfAbsent,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
@@ -607,6 +607,53 @@ publicApi.get("/api/hit-metadata", async (req, reply) => {
       complete: !hasNextPage,
     },
     links,
+  };
+});
+
+// Paginated capture-integrity rows for the operator quality dashboard. This is
+// public read-only data; Tailnet reachability controls UI discoverability only.
+publicApi.get("/api/data-quality", async (req, reply) => {
+  const { startDate, endDate } = req.query ?? {};
+  const page = parsePositiveInteger(req.query?.page, 1);
+  const pageSize = parsePositiveInteger(
+    req.query?.pageSize,
+    MAX_HIT_METADATA_PAGE_SIZE,
+    MAX_HIT_METADATA_PAGE_SIZE,
+  );
+  const boundsError = dateBoundsError(startDate, endDate);
+  if (boundsError) {
+    reply.code(400);
+    return { error: boundsError };
+  }
+  if (page === null) {
+    reply.code(400);
+    return { error: "page must be a positive integer" };
+  }
+  if (pageSize === null) {
+    reply.code(400);
+    return { error: `pageSize must be an integer between 1 and ${MAX_HIT_METADATA_PAGE_SIZE}` };
+  }
+
+  const { items, totalRecords } = listDataQualityPage(db, {
+    startDate,
+    endDate,
+    page,
+    pageSize,
+  });
+  const totalPages = Math.ceil(totalRecords / pageSize);
+  const hasNextPage = page * pageSize < totalRecords;
+  return {
+    items,
+    pagination: {
+      page,
+      pageSize,
+      returnedRecords: items.length,
+      totalRecords,
+      totalPages,
+      hasNextPage,
+      nextPage: hasNextPage ? page + 1 : null,
+      complete: !hasNextPage,
+    },
   };
 });
 

@@ -148,6 +148,7 @@ npm run server:private
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
 | `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
 | `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
+| `GET /api/data-quality` | List timeboxed capture-integrity and XRUN facts, with inclusive `startDate`/`endDate` filters and 1-based pagination (max `pageSize` 1000) |
 | `GET /api/diary/:id/data-quality` | Get timeboxed capture-integrity and XRUN facts for one recording |
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |

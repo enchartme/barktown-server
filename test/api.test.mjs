@@ -515,6 +515,21 @@ test("POST /api/diary/:id/data-quality stores strictly timeboxed XRUN facts", as
   assert.equal((await get.json()).durationS, 2);
 });
 
+test("GET /api/data-quality lists public quality rows with pagination and date filters", async () => {
+  const response = await fetch(
+    `${publicServer.baseUrl}/api/data-quality?startDate=2026-01-02&endDate=2026-01-02&page=1&pageSize=1`,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.items.length, 1);
+  assert.equal(body.items[0].recordId, "quality-test");
+  assert.equal(body.pagination.totalRecords, 1);
+  assert.equal(body.pagination.complete, true);
+
+  const invalid = await fetch(`${publicServer.baseUrl}/api/data-quality?pageSize=1001`);
+  assert.equal(invalid.status, 400);
+});
+
 test("POST /api/diary/:id/data-quality rejects events at the exclusive clip end", async () => {
   const response = await fetch(`${privateServer.baseUrl}/api/diary/invalid-quality/data-quality`, {
     method: "POST",
