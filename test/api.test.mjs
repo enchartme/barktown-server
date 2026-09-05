@@ -291,6 +291,48 @@ test("PATCH /api/diary/:id/trim validates bounds and stays private", async () =>
   assert.equal(publicMutation.status, 404);
 });
 
+test("PATCH /api/diary/:id/approved sets and clears a server timestamp", async () => {
+  const path = "/api/diary/2026-01-02_13-14-15_false-positive/approved";
+  const before = Date.now();
+  const approve = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: true }),
+  });
+  assert.equal(approve.status, 200);
+  const approved = await approve.json();
+  assert.equal(typeof approved.approved, "string");
+  assert.ok(Date.parse(approved.approved) >= before);
+
+  const publicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
+  assert.equal((await publicEntry.json()).approved, approved.approved);
+
+  const clear = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: false }),
+  });
+  assert.equal(clear.status, 200);
+  assert.deepEqual(await clear.json(), { approved: null });
+});
+
+test("PATCH /api/diary/:id/approved validates input and stays private", async () => {
+  const path = "/api/diary/2026-01-02_13-14-15_false-positive/approved";
+  const invalid = await fetch(`${privateServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: "yes" }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const publicMutation = await fetch(`${publicServer.baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: true }),
+  });
+  assert.equal(publicMutation.status, 404);
+});
+
 test("PUT /api/diary/:id/comment creates and updates an unlinked diary note", async () => {
   const url = `${privateServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/comment`;
   const create = await fetch(url, {

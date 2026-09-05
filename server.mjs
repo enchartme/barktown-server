@@ -54,7 +54,7 @@ import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
-  listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, deleteDiaryEntryRow,
+  listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertDataQuality, getDataQuality, listDataQualityPage, deleteDataQualityRow, moveDataQualityRecord,
@@ -744,6 +744,24 @@ privateApi.patch("/api/diary/:id/trim", async (req, reply) => {
     ? {}
     : { trimStartMs, trimStopMs });
   return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs };
+});
+
+// Approvals are operator review state. Store the server's current time when
+// approved and clear the timestamp when approval is withdrawn.
+privateApi.patch("/api/diary/:id/approved", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  if (typeof req.body?.approved !== "boolean") {
+    reply.code(400);
+    return { error: "approved must be a boolean" };
+  }
+
+  const updated = setDiaryApproved(db, entry.id, req.body.approved);
+  return { approved: updated.approved };
 });
 
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).

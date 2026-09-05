@@ -5,7 +5,7 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 
-import { getDiaryEntry, openDb, setDiaryTrim, upsertDiaryEntry } from "../lib/db.mjs";
+import { getDiaryEntry, openDb, setDiaryApproved, setDiaryTrim, upsertDiaryEntry } from "../lib/db.mjs";
 
 
 test("openDb migrates source identity and trim columns while diary upserts retain them", () => {
@@ -37,6 +37,7 @@ test("openDb migrates source identity and trim columns while diary upserts retai
     assert.ok(columns.has("source_wav_etag"));
     assert.ok(columns.has("trim_start_ms"));
     assert.ok(columns.has("trim_stop_ms"));
+    assert.ok(columns.has("approved"));
 
     const entry = {
       id: "clip-a",
@@ -54,6 +55,7 @@ test("openDb migrates source identity and trim columns while diary upserts retai
     };
     upsertDiaryEntry(db, entry);
     setDiaryTrim(db, entry.id, { trimStartMs: 500, trimStopMs: 2500 });
+    setDiaryApproved(db, entry.id, true);
     upsertDiaryEntry(db, { ...entry, sourceWavPath: null, sourceWavEtag: null });
 
     const stored = getDiaryEntry(db, entry.id);
@@ -61,6 +63,7 @@ test("openDb migrates source identity and trim columns while diary upserts retai
     assert.equal(stored.sourceWavEtag, entry.sourceWavEtag);
     assert.equal(stored.trimStartMs, 500);
     assert.equal(stored.trimStopMs, 2500);
+    assert.match(stored.approved, /^\d{4}-\d{2}-\d{2}T/);
   } finally {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
