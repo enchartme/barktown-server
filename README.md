@@ -221,21 +221,37 @@ analyzer stdout/stderr are capped as well as timed out.
 
 ### Bulk re-analysis by date
 
-Run the server-local CLI with exactly one real calendar date. It loads the
-current diary, selects only entries on that date whose source WAV is currently
-available, and submits them through a bounded worker pool:
+Run the server-local CLI with one real calendar date, or an explicit inclusive
+date range. It loads the current diary, selects only matching entries whose
+source WAV is currently available, and submits them through a bounded worker
+pool:
 
 ```bash
 cd ~/git/enchartme/barktown-server
-npm run bulk-reanalyze -- 2026-08-12
+npm run bulk-reanalyze -- 2026-08-20
+npm run bulk-reanalyze -- --start-date 2026-08-20 --end-date 2026-08-27 -t 0.9
 ```
 
-The required `YYYY-MM-DD` argument deliberately limits each invocation to one
-day. The CLI prints a `START` line as each worker takes a record, an `OK` or
-`FAIL` line as it completes, and a final succeeded/failed/unavailable summary.
-A failed recording does not stop the rest of the date. Entries without a
-discoverable archive or linked training WAV are counted as unavailable and are
-not submitted.
+The `--` before named options is required by npm so it forwards those options
+to the script. Both `--start-date` and `--end-date` are required for range mode,
+and all dates must use `YYYY-MM-DD`. The CLI prints a `START` line as each worker
+takes a record, an `OK` or `FAIL` line as it completes, and a final
+succeeded/failed/unavailable summary. A failed recording does not stop the rest
+of the selection. Entries without a discoverable archive or linked training WAV
+are counted as unavailable and are not submitted.
+
+Per-run analyzer overrides are optional:
+
+| Option | API setting | Allowed value |
+|---|---|---|
+| `-t`, `--threshold` | `candidate_threshold` | `0..1` |
+| `-r`, `--refractory` | `hit_refractory_s` | `>= 0` seconds |
+| `-w`, `--window` | `inference_window_s` | `>= 0.1` seconds |
+| `-s`, `--step` | `score_interval_s` | `>= 0.05` seconds |
+
+Only supplied options override the current SQLite `monitor_params` values for
+this CLI run. They are sent with every selected request and recorded in its
+hit-metadata provenance; the database defaults themselves are not changed.
 
 The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits work to
 `http://127.0.0.1:$PRIVATE_API_PORT`. It uses the same

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   isIsoDate,
+  parseBulkReanalyzeArgs,
   runBulkReanalysis,
   selectReanalyzableEntries,
 } from "../lib/bulk-reanalyze.mjs";
@@ -13,13 +14,54 @@ test("bulk re-analysis requires a real ISO calendar date", () => {
   assert.equal(isIsoDate("12-08-2026"), false);
 });
 
-test("bulk selection is limited to one date and currently available sources", () => {
+test("bulk arguments accept one day and an inclusive range with tuning overrides", () => {
+  assert.deepEqual(parseBulkReanalyzeArgs(["2026-08-20"]), {
+    startDate: "2026-08-20",
+    endDate: "2026-08-20",
+    tuning: {},
+  });
+  assert.deepEqual(parseBulkReanalyzeArgs([
+    "--start-date", "2026-08-20",
+    "--end-date", "2026-08-27",
+    "-t", "0.9",
+    "-r", "1.25",
+    "-w", "1.5",
+    "-s", "0.25",
+  ]), {
+    startDate: "2026-08-20",
+    endDate: "2026-08-27",
+    tuning: {
+      candidateThreshold: 0.9,
+      hitRefractoryS: 1.25,
+      inferenceWindowS: 1.5,
+      scoreIntervalS: 0.25,
+    },
+  });
+});
+
+test("bulk arguments reject incomplete ranges, invalid bounds, and mixed date forms", () => {
+  assert.throws(() => parseBulkReanalyzeArgs([]), /provide one date/);
+  assert.throws(() => parseBulkReanalyzeArgs(["--start-date", "2026-08-20"]), /both/);
+  assert.throws(() => parseBulkReanalyzeArgs([
+    "--start-date", "2026-08-27", "--end-date", "2026-08-20",
+  ]), /later than/);
+  assert.throws(() => parseBulkReanalyzeArgs(["2026-08-20", "-t", "1.1"]), /threshold/);
+  assert.throws(() => parseBulkReanalyzeArgs([
+    "2026-08-20", "--start-date", "2026-08-20", "--end-date", "2026-08-21",
+  ]), /not both/);
+});
+
+test("bulk selection is limited to an inclusive date range and available sources", () => {
   const entries = [
     { id: "a", date: "2026-08-12", reanalyzable: true },
-    { id: "b", date: "2026-08-12", reanalyzable: false },
+    { id: "b", date: "2026-08-13", reanalyzable: false },
     { id: "c", date: "2026-08-13", reanalyzable: true },
+    { id: "d", date: "2026-08-14", reanalyzable: true },
   ];
-  assert.deepEqual(selectReanalyzableEntries(entries, "2026-08-12"), [entries[0]]);
+  assert.deepEqual(selectReanalyzableEntries(entries, "2026-08-12", "2026-08-13"), [
+    entries[0],
+    entries[2],
+  ]);
 });
 
 test("bulk worker pool bounds concurrency, reports progress, and continues after failure", async () => {
