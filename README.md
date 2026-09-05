@@ -177,6 +177,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `DELETE /api/diary/:id` | Delete a diary entry |
 | `POST /api/diary/:id/move-to-samples` | Publish a diary recording and waveform as a training sample |
 | `POST /api/samples/:id/regenerate-waveform` | Regenerate a training-sample waveform |
+| `POST /api/samples/:id/reanalyze` | Reclassify a sample WAV and atomically replace its bark/review/yap fragments with new bark windows |
 | `DELETE /api/samples/:id` | Delete a sample (MinIO objects + DB row) |
 | `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |
 | `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |
@@ -214,6 +215,10 @@ Goblin's callback-aligned live event state machine. It applies and records only
 `score_interval_s`. Confirmation, silence-gap, cooldown, and event assembly do
 not participate. A successful re-analysis clears the recording's approval,
 because the previously reviewed hit set and automatic trim have been replaced.
+Training-sample re-analysis uses the same deterministic analyzer and tuning
+overrides. It preserves notes and non-bark/review/yap fragments, removes every
+existing bark/review/yap fragment, then adds one model-sourced bark fragment for
+each newly accepted classifier window.
 
 The API permits four re-analysis operations at a time by default. Additional
 records wait in FIFO order; another request for a record that is already queued

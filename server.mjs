@@ -53,7 +53,7 @@ import {
 import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
-  getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
+  getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow, replaceSampleAnalysisFragments,
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
@@ -62,8 +62,8 @@ import {
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
-import { generateWaveform } from "./lib/audio.mjs";
-import { hitMetadataReviewFragments } from "./lib/hit-annotations.mjs";
+import { generateWaveform, getDuration } from "./lib/audio.mjs";
+import { hitMetadataBarkFragments, hitMetadataReviewFragments } from "./lib/hit-annotations.mjs";
 
 const CFG = buildConfig();
 const API_MODE = process.env.BARKTOWN_API_MODE ?? "public";
@@ -147,7 +147,7 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
  * the JSON produced by Goblin's tools/analyze_wav.py). Returns an error string, or
  * null if valid.
  */
-function validateHitMetadataPayload(payload, { requireProvenance = false } = {}) {
+function validateHitMetadataPayload(payload, { requireProvenance = false, requireWindow = false } = {}) {
   const {
     timestamps,
     confidences,
@@ -179,6 +179,9 @@ function validateHitMetadataPayload(payload, { requireProvenance = false } = {})
   }
   if (windowS !== undefined && (typeof windowS !== "number" || !Number.isFinite(windowS) || windowS <= 0)) {
     return "window_s must be a positive finite number";
+  }
+  if (requireWindow && windowS === undefined) {
+    return "window_s is required from the offline analyzer";
   }
   if (
     modelTrainedAt !== undefined
@@ -420,6 +423,16 @@ function validateReanalyzeTuning(body) {
     }
   }
   return null;
+}
+
+/** Merge optional request overrides into the current DB-backed analyzer defaults. */
+function resolveReanalyzeTuning(body) {
+  const monitorParams = getMonitorParamsMap(db);
+  const monitorSettings = {};
+  for (const [bodyField, { paramId }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+    monitorSettings[paramId] = body?.[bodyField] ?? monitorParams[paramId];
+  }
+  return { monitorSettings };
 }
 
 /** Stat an object, returning null only for a genuine not-found response. */
@@ -895,12 +908,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
     reply.code(400);
     return { error: tuningError };
   }
-  const monitorParams = getMonitorParamsMap(db);
-  const effectiveMonitorSettings = {};
-  for (const [bodyField, { paramId }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
-    effectiveMonitorSettings[paramId] = req.body?.[bodyField] ?? monitorParams[paramId];
-  }
-  const tuning = { monitorSettings: effectiveMonitorSettings };
+  const tuning = resolveReanalyzeTuning(req.body);
 
   try {
     return await reanalysisLimiter.run(entry.id, async () => {
@@ -1232,6 +1240,91 @@ privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
     return { waveformPath: waveformKey };
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// Reclassify a training sample's WAV. Existing bark/review/yap fragments are
+// replaced atomically with exact bark windows from the new analyzer result;
+// notes and fragments with every other label are preserved.
+privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
+  const sample = getSample(db, req.params.id);
+  if (!sample || sample.status !== "active") {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  const tuningError = validateReanalyzeTuning(req.body);
+  if (tuningError) {
+    reply.code(400);
+    return { error: tuningError };
+  }
+  const tuning = resolveReanalyzeTuning(req.body);
+
+  try {
+    return await reanalysisLimiter.run(`sample:${sample.id}`, async () => {
+      const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "barktown-sample-reanalyze-"));
+      const tmpPath = path.join(tmpDir, "source.wav");
+      try {
+        try {
+          await download(mc, CFG.bucket, sample.audioPath, tmpPath);
+        } catch (e) {
+          err(`sample reanalyze: could not download "${sample.audioPath}" for ${sample.id}: ${e.message}`);
+          reply.code(502);
+          return { error: `could not read training sample from MinIO: ${e.message}` };
+        }
+
+        const audioDurationSec = getDuration(CFG.ffprobeBin, tmpPath);
+        if (!Number.isFinite(audioDurationSec) || audioDurationSec <= 0) {
+          err(`sample reanalyze: could not determine audio duration for ${sample.id}`);
+          reply.code(502);
+          return { error: "could not determine training sample duration" };
+        }
+
+        let payload;
+        try {
+          payload = await runReanalyzeScript(CFG, tmpPath, tuning);
+        } catch (e) {
+          err(`sample reanalyze: scoring failed for ${sample.id}: ${e.message}`);
+          reply.code(502);
+          return { error: `re-analysis failed: ${e.message}` };
+        }
+
+        const validationError = validateHitMetadataPayload(payload, {
+          requireProvenance: true,
+          requireWindow: true,
+        });
+        if (validationError) {
+          err(`sample reanalyze: analyze_wav.py produced an invalid payload for ${sample.id}: ${validationError}`);
+          reply.code(502);
+          return { error: `re-analysis produced an invalid payload: ${validationError}` };
+        }
+
+        let barkFragments;
+        try {
+          barkFragments = hitMetadataBarkFragments(payload, audioDurationSec);
+        } catch (e) {
+          err(`sample reanalyze: analyze_wav.py produced invalid hit windows for ${sample.id}: ${e.message}`);
+          reply.code(502);
+          return { error: `re-analysis produced invalid hit windows: ${e.message}` };
+        }
+        const annotations = replaceSampleAnalysisFragments(db, sample.id, barkFragments);
+        log(`Re-analyzed training sample ${sample.id}: ${barkFragments.length} bark fragment(s)`);
+        return {
+          annotations,
+          barkFragmentsAdded: barkFragments.length,
+          modelTrainedAt: payload.model_trained_at,
+          analysisSettings: payload.analysis_settings,
+        };
+      } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+  } catch (e) {
+    if (e instanceof ReanalysisAlreadyRunningError) {
+      reply.code(409);
+      return { error: e.message };
+    }
+    throw e;
   }
 });
 
