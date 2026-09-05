@@ -1157,7 +1157,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   const reviewFragments = sampleCreated ? hitMetadataReviewFragments(hitMeta) : [];
   if (reviewFragments.length > 0) {
     // timestamps[i] is the end anchor of the detection window, so the
-    // fragment starts one padding margin before it.
+    // fragment starts one recorded inference-window length before it.
     for (const fragment of reviewFragments) {
       insertAnnotation(db, move.sampleId, fragment);
     }

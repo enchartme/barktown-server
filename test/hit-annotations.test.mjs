@@ -3,11 +3,22 @@ import assert from "node:assert/strict";
 
 import { hitMetadataBarkFragments, hitMetadataReviewFragments } from "../lib/hit-annotations.mjs";
 
-test("copied hit metadata becomes review fragments", () => {
-  assert.deepEqual(hitMetadataReviewFragments({ timestamps: [1, 2.3456], paddingS: 1.5 }), [
-    { startSec: 0, endSec: 1, label: "review", source: "model" },
-    { startSec: 0.846, endSec: 2.346, label: "review", source: "model" },
+test("copied hit metadata becomes inference-window review fragments", () => {
+  assert.deepEqual(hitMetadataReviewFragments({
+    timestamps: [1.5, 3.3456],
+    paddingS: 0,
+    windowS: 1.5,
+  }), [
+    { startSec: 0, endSec: 1.5, label: "review", source: "model" },
+    { startSec: 1.846, endSec: 3.346, label: "review", source: "model" },
   ]);
+});
+
+test("review fragments require the inference window metadata", () => {
+  assert.throws(
+    () => hitMetadataReviewFragments({ timestamps: [1.5], paddingS: 1.5 }),
+    /window must be a positive finite number/,
+  );
 });
 
 test("offline hits become exact model-generated bark windows", () => {
