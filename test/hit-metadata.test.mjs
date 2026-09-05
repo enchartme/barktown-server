@@ -5,7 +5,16 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 
-import { getHitMetadata, openDb, openReadonlyDb, upsertHitMetadata } from "../lib/db.mjs";
+import {
+  getDiaryEntry,
+  getHitMetadata,
+  openDb,
+  openReadonlyDb,
+  saveReanalysisResult,
+  setDiaryApproved,
+  upsertDiaryEntry,
+  upsertHitMetadata,
+} from "../lib/db.mjs";
 
 
 test("openDb migrates legacy hit_metadata rows to provenance columns", () => {
@@ -77,6 +86,48 @@ test("openReadonlyDb shares live WAL reads but rejects writes", () => {
   } finally {
     reader.close();
     writer.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("successful re-analysis replaces metadata and trim while clearing approval atomically", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-reanalysis-result-test-"));
+  const db = openDb(path.join(tmpDir, "result.db"));
+  const id = "2026-08-20_12-00-00_-A-";
+  try {
+    upsertDiaryEntry(db, {
+      id,
+      filename: "2026-08-20 12-00-00 -A-.mp3",
+      audioPath: "audio/2026/08/2026-08-20 12-00-00 -A-.mp3",
+      waveformPath: null,
+      label: "-A-",
+      date: "2026-08-20",
+      time: "12:00",
+      datetimeLocal: "2026-08-20T12:00:00",
+      durationSec: 10,
+      kind: "audio",
+    });
+    setDiaryApproved(db, id, true);
+    assert.equal(typeof getDiaryEntry(db, id).approved, "string");
+
+    const saved = saveReanalysisResult(db, id, {
+      timestamps: [2, 7],
+      confidences: [0.93, 0.98],
+      loudnesses: [1.4, 2.1],
+      paddingS: 0,
+      windowS: 1.5,
+      modelTrainedAt: "2026-08-19T10:00:00Z",
+      analysisSettings: { monitor: { candidate_threshold: 0.9 } },
+      analysisTrigger: "manual",
+    }, { trimStartMs: 500, trimStopMs: 8500 });
+
+    assert.equal(saved.approved, null);
+    assert.deepEqual(saved.timestamps, [2, 7]);
+    assert.equal(saved.trimStartMs, 500);
+    assert.equal(saved.trimStopMs, 8500);
+    assert.equal(getDiaryEntry(db, id).approved, null);
+  } finally {
+    db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

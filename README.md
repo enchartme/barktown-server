@@ -212,7 +212,8 @@ Manual re-analysis is deterministic window reclassification, not replay of
 Goblin's callback-aligned live event state machine. It applies and records only
 `candidate_threshold`, `hit_refractory_s`, `inference_window_s`, and
 `score_interval_s`. Confirmation, silence-gap, cooldown, and event assembly do
-not participate.
+not participate. A successful re-analysis clears the recording's approval,
+because the previously reviewed hit set and automatic trim have been replaced.
 
 The API permits four re-analysis operations at a time by default. Additional
 records wait in FIFO order; another request for a record that is already queued

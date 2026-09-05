@@ -56,7 +56,7 @@ import {
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
-  upsertHitMetadata, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
+  upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertDataQuality, getDataQuality, listDataQualityPage, deleteDataQualityRow, moveDataQualityRecord,
   upsertSample, insertSampleIfAbsent,
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
@@ -944,7 +944,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
           return { error: `re-analysis produced an invalid payload: ${validationError}` };
         }
 
-        upsertHitMetadata(db, entry.id, {
+        const hitMetadata = {
           timestamps: payload.timestamps,
           confidences: payload.confidences,
           loudnesses: payload.loudnesses,
@@ -953,19 +953,16 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
           modelTrainedAt: payload.model_trained_at ?? null,
           analysisSettings: payload.analysis_settings ?? {},
           analysisTrigger: "manual",
-        });
+        };
         // Analysis always runs against the complete archived source. Once its
         // new hits are committed, show 1.5 seconds of context around the first
-        // and last hit; no hits (or a fully covered source) means no trim.
+        // and last hit; no hits (or a fully covered source) means no trim. The
+        // changed analysis also invalidates any previous operator approval.
         const automaticTrim = trimBoundsAroundHits(payload.timestamps, entry.durationSec);
-        const trimmedEntry = setDiaryTrim(db, entry.id, automaticTrim);
+        const saved = saveReanalysisResult(db, entry.id, hitMetadata, automaticTrim);
         log(`Re-analyzed diary entry ${entry.id}: ${payload.timestamps.length} bark window(s)`);
         reply.code(201);
-        return {
-          ...getHitMetadata(db, entry.id),
-          trimStartMs: trimmedEntry.trimStartMs,
-          trimStopMs: trimmedEntry.trimStopMs,
-        };
+        return saved;
       } finally {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       }
