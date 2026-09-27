@@ -126,6 +126,27 @@ test("re-running with no changes is a no-op", { skip }, async () => {
   assert.match(out, /exported=0 moved=0 unchanged=1 removed=0/);
 });
 
+test("no-op exports refresh persistent window-review provenance", { skip }, async () => {
+  const keep = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "keep",
+      expected: { sampleId: "sample-001", label: "bark", startMs: 500, endMs: 1000 },
+    }),
+  });
+  assert.equal(keep.status, 200);
+
+  const out = await runExport();
+  assert.match(out, /exported=0 moved=0 unchanged=1 removed=0/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(cacheDir, "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.fragments["sample-001_500-1000"], {
+    annotationId,
+    label: "bark",
+    windowReview: "keep",
+  });
+});
+
 test("relabeling moves the exported file without re-downloading/re-slicing", { skip }, async () => {
   const patch = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}`, {
     method: "PATCH",

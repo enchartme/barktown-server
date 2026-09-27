@@ -53,7 +53,8 @@ import {
 import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
-  getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow, replaceSampleAnalysisFragments,
+  getAnnotation, insertAnnotation, updateAnnotation, applyAnnotationWindowReview,
+  deleteAnnotationRow, replaceSampleAnalysisFragments,
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
@@ -138,6 +139,71 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
   }
   if (typeof label !== "string" || label.trim().length === 0) {
     return "label is required";
+  }
+  return null;
+}
+
+function validateExpectedFragment(expected) {
+  if (!expected || typeof expected !== "object" || Array.isArray(expected)) {
+    return "expected fragment is required";
+  }
+  if (typeof expected.sampleId !== "string" || !expected.sampleId) {
+    return "expected.sampleId is required";
+  }
+  if (typeof expected.label !== "string" || !expected.label) {
+    return "expected.label is required";
+  }
+  for (const field of ["startMs", "endMs"]) {
+    if (!Number.isInteger(expected[field]) || expected[field] < 0) {
+      return `expected.${field} must be a non-negative integer`;
+    }
+  }
+  if (expected.endMs <= expected.startMs) {
+    return "expected.endMs must be greater than expected.startMs";
+  }
+  return null;
+}
+
+function validateWindowReviewProposal(action, expected, proposal, durationSec) {
+  if (action === "keep") return null;
+  if (!proposal || !Array.isArray(proposal.fragments)) {
+    return "proposal.fragments is required";
+  }
+  const expectedCount = action === "split-trim" ? 2 : 1;
+  if (proposal.fragments.length !== expectedCount) {
+    return `${action} requires ${expectedCount} replacement fragment${expectedCount === 1 ? "" : "s"}`;
+  }
+  for (const fragment of proposal.fragments) {
+    if (
+      !fragment
+      || !Number.isInteger(fragment.startMs)
+      || !Number.isInteger(fragment.endMs)
+      || fragment.startMs < 0
+      || fragment.endMs <= fragment.startMs
+    ) {
+      return "replacement fragment bounds must be non-negative integer milliseconds with endMs > startMs";
+    }
+    if (Number.isFinite(durationSec) && durationSec > 0 && fragment.endMs > Math.round((durationSec + 0.25) * 1000)) {
+      return "replacement fragment exceeds the sample duration";
+    }
+  }
+
+  const [first, second] = proposal.fragments;
+  if (action === "trim-start" && !(first.startMs > expected.startMs && first.endMs === expected.endMs)) {
+    return "trim-start must move only the fragment start inward";
+  }
+  if (action === "trim-end" && !(first.startMs === expected.startMs && first.endMs < expected.endMs)) {
+    return "trim-end must move only the fragment end inward";
+  }
+  if (
+    action === "split-trim"
+    && !(
+      first.startMs === expected.startMs
+      && second.endMs === expected.endMs
+      && first.endMs < second.startMs
+    )
+  ) {
+    return "split-trim must preserve the outer bounds and leave a trimmed gap between fragments";
   }
   return null;
 }
@@ -1515,6 +1581,44 @@ privateApi.patch("/api/annotations/:annotationId", async (req, reply) => {
   }
 
   return updateAnnotation(db, annotationId, merged);
+});
+
+privateApi.post("/api/annotations/:annotationId/window-review", async (req, reply) => {
+  const annotationId = Number(req.params.annotationId);
+  const existing = getAnnotation(db, annotationId);
+  if (!existing) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  const { action, expected, proposal } = req.body ?? {};
+  if (!["keep", "trim-start", "trim-end", "split-trim"].includes(action)) {
+    reply.code(400);
+    return { error: "action must be keep, trim-start, trim-end, or split-trim" };
+  }
+  const expectedError = validateExpectedFragment(expected);
+  if (expectedError) {
+    reply.code(400);
+    return { error: expectedError };
+  }
+  if (expected.label !== "bark" && expected.label !== "yap") {
+    reply.code(400);
+    return { error: "window review is only available for bark and yap fragments" };
+  }
+
+  const sample = getSample(db, existing.sampleId);
+  const proposalError = validateWindowReviewProposal(action, expected, proposal, sample?.durationSec);
+  if (proposalError) {
+    reply.code(400);
+    return { error: proposalError };
+  }
+
+  const result = applyAnnotationWindowReview(db, annotationId, { action, expected, proposal });
+  if (result.conflict) {
+    reply.code(409);
+    return { error: "fragment changed since this projection was generated" };
+  }
+  return { action, annotations: result.annotations };
 });
 
 privateApi.delete("/api/annotations/:annotationId", async (req, reply) => {
