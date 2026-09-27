@@ -412,6 +412,17 @@ const REANALYZE_TUNING_FIELDS = {
   scoreIntervalS:     { paramId: "score_interval_s", min: 0.05 },
 };
 
+const BULK_REANALYZE_MODE_HEADER = "x-barktown-reanalysis-mode";
+
+/**
+ * Interactive work reserves the full CPU budget for one file. The bulk CLI
+ * marks its requests so each file reserves one slot and the CLI can spread the
+ * same budget across files.
+ */
+function reanalyzeWorkersForRequest(req) {
+  return req.headers[BULK_REANALYZE_MODE_HEADER] === "bulk" ? 1 : CFG.reanalyze.concurrency;
+}
+
 /** Validate optional detection-tuning overrides. Returns an error string, or null if valid. */
 function validateReanalyzeTuning(body) {
   for (const [field, { min, max }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
@@ -909,6 +920,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
     return { error: tuningError };
   }
   const tuning = resolveReanalyzeTuning(req.body);
+  const workers = reanalyzeWorkersForRequest(req);
 
   try {
     return await reanalysisLimiter.run(entry.id, async () => {
@@ -938,7 +950,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
 
         let payload;
         try {
-          payload = await runReanalyzeScript(CFG, tmpPath, tuning);
+          payload = await runReanalyzeScript(CFG, tmpPath, tuning, { workers });
         } catch (e) {
           err(`reanalyze: scoring failed for ${entry.id}: ${e.message}`);
           reply.code(502);
@@ -974,7 +986,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
       } finally {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       }
-    });
+    }, { slots: workers });
   } catch (e) {
     if (e instanceof ReanalysisAlreadyRunningError) {
       reply.code(409);
@@ -1259,6 +1271,7 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
     return { error: tuningError };
   }
   const tuning = resolveReanalyzeTuning(req.body);
+  const workers = reanalyzeWorkersForRequest(req);
 
   try {
     return await reanalysisLimiter.run(`sample:${sample.id}`, async () => {
@@ -1282,7 +1295,7 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
 
         let payload;
         try {
-          payload = await runReanalyzeScript(CFG, tmpPath, tuning);
+          payload = await runReanalyzeScript(CFG, tmpPath, tuning, { workers });
         } catch (e) {
           err(`sample reanalyze: scoring failed for ${sample.id}: ${e.message}`);
           reply.code(502);
@@ -1318,7 +1331,7 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
       } finally {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       }
-    });
+    }, { slots: workers });
   } catch (e) {
     if (e instanceof ReanalysisAlreadyRunningError) {
       reply.code(409);
@@ -1547,7 +1560,7 @@ try {
   log(`${serviceName} listening on http://${host}:${port}`);
   log(`  access: ${isPublicApi ? "anonymous read-only" : "Tailnet private"}`);
   log(`  db: ${CFG.dbPath}`);
-  if (!isPublicApi) log(`  re-analysis workers: ${CFG.reanalyze.concurrency}`);
+  if (!isPublicApi) log(`  re-analysis CPU slots: ${CFG.reanalyze.concurrency}`);
 } catch (e) {
   err(e);
   process.exit(1);

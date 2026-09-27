@@ -82,7 +82,10 @@ const results = await runBulkReanalysis(eligible, {
     `${privateApiBase}/api/diary/${encodeURIComponent(entry.id)}/reanalyze`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Barktown-Reanalysis-Mode": "bulk",
+      },
       body: JSON.stringify(tuning),
     },
   )),

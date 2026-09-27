@@ -26,7 +26,8 @@ test("runReanalyzeScript passes one effective monitor settings snapshot", async 
       model_trained_at: "2026-08-12T13:32:07Z",
       analysis_settings: { classifier: { threshold: 0.42 }, monitor },
       analysis_trigger: "manual",
-      input: value("--input"), model_dir: value("--model-dir")
+      input: value("--input"), model_dir: value("--model-dir"),
+      workers: Number(value("--workers"))
     }));
   `);
   const monitorSettings = {
@@ -46,14 +47,22 @@ test("runReanalyzeScript passes one effective monitor settings snapshot", async 
   };
 
   try {
-    const payload = await runReanalyzeScript(cfg, "/archive/source.wav", { monitorSettings });
+    const payload = await runReanalyzeScript(cfg, "/archive/source.wav", { monitorSettings }, { workers: 3 });
     assert.equal(payload.input, "/archive/source.wav");
     assert.equal(payload.model_dir, "/models");
+    assert.equal(payload.workers, 3);
     assert.deepEqual(payload.analysis_settings.monitor, monitorSettings);
     assert.equal(payload.analysis_trigger, "manual");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("runReanalyzeScript requires a positive worker count", () => {
+  assert.throws(
+    () => runReanalyzeScript({ reanalyze: {} }, "/archive/source.wav", {}, { workers: 0 }),
+    /workers must be a positive integer/,
+  );
 });
 
 test("runReanalyzeScript kills analyzers that exceed output limits", async () => {
