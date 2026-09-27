@@ -654,6 +654,94 @@ test("PATCH /api/annotations/:id updates the label", async () => {
   assert.equal(updated.label, "yap");
 });
 
+test("window review keeps fragments persistently and clears keep after editing", async () => {
+  const create = await fetch(`${privateServer.baseUrl}/api/samples/sample-001/annotations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ startSec: 0, endSec: 2, label: "bark", source: "manual" }),
+  });
+  assert.equal(create.status, 201);
+  const fragment = await create.json();
+  const expected = { sampleId: "sample-001", label: "bark", startMs: 0, endMs: 2000 };
+
+  const keep = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "keep", expected }),
+  });
+  assert.equal(keep.status, 200);
+  assert.equal((await keep.json()).annotations[0].windowReview, "keep");
+
+  const edit = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endSec: 1.9 }),
+  });
+  assert.equal(edit.status, 200);
+  assert.equal((await edit.json()).windowReview, null);
+
+  const stale = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "keep", expected }),
+  });
+  assert.equal(stale.status, 409);
+});
+
+test("window review applies trim and split proposals atomically", async () => {
+  const trimCreate = await fetch(`${privateServer.baseUrl}/api/samples/sample-001/annotations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ startSec: 0, endSec: 1.9, label: "bark", source: "manual" }),
+  });
+  const trimFragment = await trimCreate.json();
+  const trim = await fetch(`${privateServer.baseUrl}/api/annotations/${trimFragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "trim-end",
+      expected: { sampleId: "sample-001", label: "bark", startMs: 0, endMs: 1900 },
+      proposal: { fragments: [{ startMs: 0, endMs: 1420 }] },
+    }),
+  });
+  assert.equal(trim.status, 200);
+  assert.deepEqual(
+    (await trim.json()).annotations.map(({ startSec, endSec }) => ({ startSec, endSec })),
+    [{ startSec: 0, endSec: 1.42 }],
+  );
+
+  const splitCreate = await fetch(`${privateServer.baseUrl}/api/samples/sample-001/annotations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ startSec: 0, endSec: 2, label: "yap", source: "manual" }),
+  });
+  const splitFragment = await splitCreate.json();
+  const split = await fetch(`${privateServer.baseUrl}/api/annotations/${splitFragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "split-trim",
+      expected: { sampleId: "sample-001", label: "yap", startMs: 0, endMs: 2000 },
+      proposal: {
+        fragments: [
+          { startMs: 0, endMs: 850 },
+          { startMs: 1000, endMs: 2000 },
+        ],
+      },
+    }),
+  });
+  assert.equal(split.status, 200);
+  const splitRows = (await split.json()).annotations;
+  assert.equal(splitRows.length, 2);
+  assert.deepEqual(
+    splitRows.map(({ startSec, endSec, label }) => ({ startSec, endSec, label })),
+    [
+      { startSec: 0, endSec: 0.85, label: "yap" },
+      { startSec: 1, endSec: 2, label: "yap" },
+    ],
+  );
+});
+
 test("DELETE /api/annotations/:id removes it", async () => {
   const res = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}`, { method: "DELETE" });
   assert.equal(res.status, 204);
