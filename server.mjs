@@ -64,7 +64,7 @@ import {
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 import { generateWaveform, getDuration } from "./lib/audio.mjs";
-import { hitMetadataBarkFragments, hitMetadataReviewFragments } from "./lib/hit-annotations.mjs";
+import { hitMetadataReviewFragments, hitMetadataTrainingReviewFragments } from "./lib/hit-annotations.mjs";
 
 const CFG = buildConfig();
 const API_MODE = process.env.BARKTOWN_API_MODE ?? "public";
@@ -1322,7 +1322,7 @@ privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
 });
 
 // Reclassify a training sample's WAV. Existing bark/review/yap fragments are
-// replaced atomically with exact bark windows from the new analyzer result;
+// replaced atomically with exact review windows from the new analyzer result;
 // notes and fragments with every other label are preserved.
 privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
   const sample = getSample(db, req.params.id);
@@ -1378,19 +1378,21 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
           return { error: `re-analysis produced an invalid payload: ${validationError}` };
         }
 
-        let barkFragments;
+        let reviewFragments;
         try {
-          barkFragments = hitMetadataBarkFragments(payload, audioDurationSec);
+          reviewFragments = hitMetadataTrainingReviewFragments(payload, audioDurationSec);
         } catch (e) {
           err(`sample reanalyze: analyze_wav.py produced invalid hit windows for ${sample.id}: ${e.message}`);
           reply.code(502);
           return { error: `re-analysis produced invalid hit windows: ${e.message}` };
         }
-        const annotations = replaceSampleAnalysisFragments(db, sample.id, barkFragments);
-        log(`Re-analyzed training sample ${sample.id}: ${barkFragments.length} bark fragment(s)`);
+        const annotations = replaceSampleAnalysisFragments(db, sample.id, reviewFragments);
+        log(`Re-analyzed training sample ${sample.id}: ${reviewFragments.length} review fragment(s)`);
         return {
           annotations,
-          barkFragmentsAdded: barkFragments.length,
+          reviewFragmentsAdded: reviewFragments.length,
+          // Retained for older clients that treated this as a detector-hit count.
+          barkFragmentsAdded: reviewFragments.length,
           modelTrainedAt: payload.model_trained_at,
           analysisSettings: payload.analysis_settings,
         };

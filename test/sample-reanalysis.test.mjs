@@ -35,8 +35,8 @@ test("sample re-analysis replaces bark/review/yap fragments and preserves everyt
     insertAnnotation(db, sample.id, { startSec: 0, endSec: 0, label: "bark", source: "note" });
 
     const annotations = replaceSampleAnalysisFragments(db, sample.id, [
-      { startSec: 4, endSec: 5.5, label: "bark", source: "model" },
-      { startSec: 7, endSec: 8.5, label: "bark", source: "model" },
+      { startSec: 4, endSec: 5.5, label: "review", source: "model" },
+      { startSec: 7, endSec: 8.5, label: "review", source: "model" },
     ]);
 
     assert.deepEqual(
@@ -44,8 +44,8 @@ test("sample re-analysis replaces bark/review/yap fragments and preserves everyt
       [
         { startSec: 0, endSec: 0, label: "bark", source: "note" },
         { startSec: 3, endSec: 4, label: "wind", source: "manual" },
-        { startSec: 4, endSec: 5.5, label: "bark", source: "model" },
-        { startSec: 7, endSec: 8.5, label: "bark", source: "model" },
+        { startSec: 4, endSec: 5.5, label: "review", source: "model" },
+        { startSec: 7, endSec: 8.5, label: "review", source: "model" },
       ],
     );
     assert.deepEqual(listAnnotations(db, sample.id), annotations);
