@@ -169,6 +169,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `GET /health` | Liveness check |
 | `GET /api/monitor-params` | List Goblin monitor parameters |
 | `PUT /api/diary/:id/comment` | Add or replace the whole-recording note, using the linked sample annotation when available |
+| `DELETE /api/diary/:id/comment` | Clear the whole-recording note from the diary entry or its linked sample |
 | `PATCH /api/diary/:id/trim` | Persist or clear non-destructive `trimStartMs`/`trimStopMs` playback bounds |
 | `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |

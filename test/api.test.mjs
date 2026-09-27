@@ -333,7 +333,7 @@ test("PATCH /api/diary/:id/approved validates input and stays private", async ()
   assert.equal(publicMutation.status, 404);
 });
 
-test("PUT /api/diary/:id/comment creates and updates an unlinked diary note", async () => {
+test("diary comment API creates, updates, and clears an unlinked diary note", async () => {
   const url = `${privateServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/comment`;
   const create = await fetch(url, {
     method: "PUT",
@@ -360,10 +360,22 @@ test("PUT /api/diary/:id/comment creates and updates an unlinked diary note", as
   const publicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
   assert.equal(publicEntry.status, 200);
   assert.deepEqual((await publicEntry.json()).annotations, updated);
+
+  const clear = await fetch(url, { method: "DELETE" });
+  assert.equal(clear.status, 200);
+  const cleared = await clear.json();
+  assert.equal(cleared.length, 1);
+  assert.equal(cleared[0].scope, "diary");
+  assert.equal(cleared[0].label, "");
+
+  const clearedPublicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
+  assert.equal(clearedPublicEntry.status, 200);
+  assert.deepEqual((await clearedPublicEntry.json()).annotations, cleared);
 });
 
-test("PUT /api/diary/:id/comment uses a linked sample-wide annotation", async () => {
-  const res = await fetch(`${privateServer.baseUrl}/api/diary/2026-01-03_13-14-15_auto/comment`, {
+test("diary comment API uses and clears a linked sample-wide annotation", async () => {
+  const url = `${privateServer.baseUrl}/api/diary/2026-01-03_13-14-15_auto/comment`;
+  const res = await fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ label: "Linked automatic comment" }),
@@ -378,6 +390,17 @@ test("PUT /api/diary/:id/comment uses a linked sample-wide annotation", async ()
   const publicList = await fetch(`${publicServer.baseUrl}/api/diary?startDate=2026-01-03&endDate=2026-01-03`);
   const entries = await publicList.json();
   assert.deepEqual(entries[0].annotations, annotations);
+
+  const clear = await fetch(url, { method: "DELETE" });
+  assert.equal(clear.status, 200);
+  const cleared = await clear.json();
+  assert.equal(cleared.length, 1);
+  assert.equal(cleared[0].scope, "diary");
+  assert.equal(cleared[0].label, "");
+
+  const clearedPublicList = await fetch(`${publicServer.baseUrl}/api/diary?startDate=2026-01-03&endDate=2026-01-03`);
+  const clearedEntries = await clearedPublicList.json();
+  assert.deepEqual(clearedEntries[0].annotations, cleared);
 });
 
 test("PUT /api/diary/:id/comment validates the label and stays private", async () => {
@@ -395,6 +418,9 @@ test("PUT /api/diary/:id/comment validates the label and stays private", async (
     body: JSON.stringify({ label: "not allowed" }),
   });
   assert.equal(publicMutation.status, 404);
+
+  const publicDelete = await fetch(`${publicServer.baseUrl}${path}`, { method: "DELETE" });
+  assert.equal(publicDelete.status, 404);
 });
 
 test("GET /api/diary validates date bounds", async () => {

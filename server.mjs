@@ -797,9 +797,38 @@ privateApi.put("/api/diary/:id/comment", async (req, reply) => {
         source: "note",
       });
     }
+    // A prior DELETE can leave an empty direct note as a durable marker that
+    // suppresses legacy filename comments. A real linked comment supersedes it.
+    deleteDiaryNote(db, entry.id);
   } else {
     upsertDiaryNote(db, entry.id, label);
   }
+
+  return listDiaryCommentAnnotations(db, { diaryId: entry.id });
+});
+
+// Clear every persisted whole-recording comment for this diary entry. Keep an
+// empty direct note as an explicit cleared marker: without it, old manual
+// recordings would fall back to displaying the immutable filename comment.
+privateApi.delete("/api/diary/:id/comment", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  if (entry.sampleId) {
+    for (const annotation of listAnnotations(db, entry.sampleId)) {
+      if (
+        annotation.source === "note"
+        && annotation.startSec === 0
+        && annotation.endSec === 0
+      ) {
+        deleteAnnotationRow(db, annotation.id);
+      }
+    }
+  }
+  upsertDiaryNote(db, entry.id, "");
 
   return listDiaryCommentAnnotations(db, { diaryId: entry.id });
 });
@@ -1214,7 +1243,7 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   // Only the request that created the deterministic sample row may copy
   // annotations; retries then remain idempotent.
-  if (sampleCreated && diaryNote) {
+  if (sampleCreated && diaryNote?.label) {
     const existingWholeNote = listAnnotations(db, move.sampleId).find(annotation => (
       annotation.source === "note"
       && annotation.startSec === 0
