@@ -23,6 +23,7 @@
     "validate-index": "node validate-index.mjs",
     "rebuild-index": "node rebuild-index.mjs",
     "rebuild-samples-index": "node rebuild-samples-index.mjs",
+    "migrate-sample-waveforms": "node rebuild-samples-index.mjs",
     "migrate-samples-to-sqlite": "node migrate-samples-to-sqlite.mjs",
     "migrate-diary": "node migrate-diary-to-sqlite.mjs",
     "dump-db": "node dump-db.mjs",

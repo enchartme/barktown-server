@@ -105,6 +105,23 @@ This is idempotent — safe to re-run any time. `training-samples-index.json`
 in the bucket continues to be regenerated from the database on every
 update, so the existing barktown client keeps working unchanged.
 
+### Bulk waveform resolution migration
+
+`rebuild-samples-index.mjs` migrates active training-sample waveforms using
+SQLite as its source of truth. It skips waveform JSON already at the current
+default resolution, so an interrupted run can be resumed safely. The default
+is a read-only dry run:
+
+```bash
+npm run migrate-sample-waveforms
+npm run migrate-sample-waveforms -- --apply
+```
+
+Use `--limit N` for a small first batch or `--force` to regenerate matching
+waveforms too. Apply mode overwrites only each sample's existing waveform
+object and republishes `training-samples-index.json` from SQLite; it does not
+change sample rows or discover samples by scanning object storage.
+
 Pending guarded one-time operations live under `migrations/`; completed
 operations and their tests are retained under `archive/`. The current
 auto-detection canonical-name migration is documented in

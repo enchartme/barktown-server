@@ -1,205 +1,283 @@
 #!/usr/bin/env node
 /**
- * barktown -- rebuild training-samples-index.json
+ * Bulk-migrate active training-sample waveforms to the current resolution.
  *
- * Scans training-samples/ in MinIO, reads duration for each WAV,
- * checks for an existing waveform in training-samples-waveforms/,
- * and writes a fresh training-samples-index.json.
+ * SQLite is the source of truth. The script never discovers samples by
+ * scanning object storage and never changes sample rows. It reads every active
+ * sample, skips waveform JSON already at the target resolution, regenerates
+ * the remainder in place, then republishes the compatibility index from DB.
  *
- * Nothing is deleted or moved. Safe to run any time.
- *
- * Usage:
+ * The default is a read-only dry run:
  *   node rebuild-samples-index.mjs
- *   npm run rebuild-samples-index
+ *   node rebuild-samples-index.mjs --apply
+ *   node rebuild-samples-index.mjs --apply --force
+ *   node rebuild-samples-index.mjs --apply --limit 100
  */
 
-import * as Minio from "minio";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { spawnSync } from "child_process";
-import { fileURLToPath } from "url";
-import { Readable } from "stream";
+import { pathToFileURL } from "url";
 
-// --- Load .env ---------------------------------------------------------------
+import { loadEnv } from "./lib/env.mjs";
+loadEnv(import.meta.url);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const envPath   = path.join(__dirname, ".env");
+import { buildConfig } from "./lib/config.mjs";
+import {
+  DEFAULT_WAVEFORM_PIXELS_PER_SECOND,
+  generateWaveform,
+} from "./lib/audio.mjs";
+import {
+  createClient,
+  download,
+  loadJson,
+  saveJson,
+  upload,
+} from "./lib/minio.mjs";
+import {
+  exportSamplesIndexJson,
+  listActiveSamples,
+  openReadonlyDb,
+} from "./lib/db.mjs";
 
-if (fs.existsSync(envPath)) {
-  for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m && !(m[1] in process.env)) {
-      process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, "").trim();
-    }
-  }
+function usage() {
+  return [
+    "Usage: node rebuild-samples-index.mjs [options]",
+    "",
+    "Bulk-migrate active training-sample waveforms using SQLite as source of truth.",
+    "Without --apply, only report what would change.",
+    "",
+    "Options:",
+    "  --apply       Regenerate and overwrite waveforms that are not at the target resolution",
+    "  --force       Regenerate every selected waveform, including matching ones",
+    "  --limit N     Inspect at most the first N active samples",
+    "  --help        Show this help",
+  ].join("\n");
 }
 
-// --- Config ------------------------------------------------------------------
+export function parseWaveformMigrationArgs(args) {
+  const options = {
+    apply: false,
+    force: false,
+    help: false,
+    limit: Infinity,
+  };
 
-const CFG = {
-  minio: {
-    endPoint:  process.env.MINIO_ENDPOINT   ?? "localhost",
-    port:      parseInt(process.env.MINIO_PORT ?? "9000", 10),
-    useSSL:    (process.env.MINIO_USE_SSL   ?? "false") === "true",
-    accessKey: process.env.MINIO_ACCESS_KEY ?? "minioadmin",
-    secretKey: process.env.MINIO_SECRET_KEY ?? "minioadmin",
-  },
-  bucket:            process.env.MINIO_BUCKET   ?? "barktown",
-  samplesPrefix:     "training-samples/",
-  samplesWavePrefix: "training-samples-waveforms/",
-  samplesIndexKey:   "training-samples-index.json",
-  ffprobeBin:        process.env.FFPROBE_BIN    ?? "ffprobe",
-};
-
-const mc = new Minio.Client(CFG.minio);
-
-// --- Filename pattern --------------------------------------------------------
-// Expected: YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
-
-const SAMPLE_FILENAME_RE =
-  /^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2}) SAMPLE ([a-z]+)\.wav$/i;
-
-function parseSampleFilename(filename) {
-  const match = SAMPLE_FILENAME_RE.exec(filename);
-  if (!match) return null;
-  const [, datePart, hh, mm, ss, label] = match;
-  const datetimeLocal = `${datePart}T${hh}:${mm}:${ss}`;
-  const stem = filename.slice(0, -".wav".length);
-  const id   = stem
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/, "");
-  return { date: datePart, datetimeLocal, label: label.toLowerCase(), id };
-}
-
-// --- Helpers -----------------------------------------------------------------
-
-function ts()      { return new Date().toISOString(); }
-function log(...a) { console.log(`[${ts()}]`, ...a); }
-function err(...a) { console.error(`[${ts()}] ERROR`, ...a); }
-
-async function listObjects(prefix) {
-  return new Promise((resolve, reject) => {
-    const objects = [];
-    const stream  = mc.listObjectsV2(CFG.bucket, prefix, true);
-    stream.on("data",  o  => objects.push(o));
-    stream.on("end",   () => resolve(objects));
-    stream.on("error", reject);
-  });
-}
-
-function getDuration(filePath) {
-  const r = spawnSync(
-    CFG.ffprobeBin,
-    ["-v", "quiet", "-print_format", "json", "-show_format", filePath],
-    { encoding: "utf8" }
-  );
-  if (r.error || r.status !== 0) return 0;
-  try {
-    return parseFloat(JSON.parse(r.stdout).format?.duration ?? "0");
-  } catch { return 0; }
-}
-
-async function uploadBuffer(data, objectKey) {
-  const buf    = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
-  const stream = Readable.from(buf);
-  await mc.putObject(CFG.bucket, objectKey, stream, buf.length, { "Content-Type": "application/json" });
-}
-
-function generateWaveform(audioPath, outPath) {
-  const r = spawnSync(
-    process.env.AUDIOWAVEFORM_BIN ?? "audiowaveform",
-    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "100", "--bits", "16"],
-    { encoding: "utf8" }
-  );
-  if (r.error || r.status !== 0) {
-    console.warn(`audiowaveform failed: ${r.stderr?.trim() || r.error?.message}`);
-    return false;
-  }
-  return true;
-}
-
-// --- Main --------------------------------------------------------------------
-
-async function main() {
-  log("Rebuilding training-samples-index.json");
-  log(`  MinIO : ${CFG.minio.useSSL ? "https" : "http"}://${CFG.minio.endPoint}:${CFG.minio.port}`);
-  log(`  bucket: ${CFG.bucket}`);
-
-  if (!(await mc.bucketExists(CFG.bucket))) {
-    err(`Bucket "${CFG.bucket}" does not exist.`);
-    process.exit(1);
-  }
-
-  // List all WAV files under training-samples/
-  const allObjects = await listObjects(CFG.samplesPrefix);
-  const wavFiles   = allObjects.filter(
-    o => !o.name.endsWith("/") && o.name.toLowerCase().endsWith(".wav") && o.size > 0
-  );
-  log(`Found ${wavFiles.length} WAV file(s) in ${CFG.samplesPrefix}`);
-
-  // Build a Set of existing waveform object keys for fast lookup
-  const waveObjects  = await listObjects(CFG.samplesWavePrefix);
-  const waveKeySet   = new Set(waveObjects.map(o => o.name));
-
-  const entries = [];
-  let skipped   = 0;
-
-  for (const obj of wavFiles) {
-    const filename = path.basename(obj.name);
-    const parsed   = parseSampleFilename(filename);
-
-    if (!parsed) {
-      log(`  SKIP  "${filename}" — filename does not match pattern`);
-      skipped++;
-      continue;
-    }
-
-    const { date, datetimeLocal, label, id } = parsed;
-
-    // Check for a pre-existing waveform — but always regenerate so we get 16-bit precision
-    const waveKey = `${CFG.samplesWavePrefix}${label}/${id}.json`;
-    let waveformPath = null;
-
-    // Download to a temp file to read duration and generate waveform
-    const tmpDir     = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-rebuild-"));
-    const tmpWav     = path.join(tmpDir, filename);
-    const tmpWaveform = path.join(tmpDir, `${id}.json`);
-    let durationSec = 0;
-    try {
-      await mc.fGetObject(CFG.bucket, obj.name, tmpWav);
-      durationSec = getDuration(tmpWav);
-      if (generateWaveform(tmpWav, tmpWaveform)) {
-        await uploadBuffer(fs.readFileSync(tmpWaveform), waveKey);
-        waveformPath = waveKey;
-      } else {
-        log(`  WARN  waveform generation failed for "${filename}"`);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--apply") options.apply = true;
+    else if (arg === "--force") options.force = true;
+    else if (arg === "--help" || arg === "-h") options.help = true;
+    else if (arg === "--limit") {
+      const value = Number.parseInt(args[++i], 10);
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error("--limit requires a positive integer");
       }
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      options.limit = value;
+    } else {
+      throw new Error(`unknown option: ${arg}`);
     }
-
-    entries.push({
-      id, filename,
-      audioPath: obj.name,
-      waveformPath,
-      date, datetimeLocal, label,
-      durationSec: parseFloat(durationSec.toFixed(3)),
-    });
-
-    log(`  OK    ${label}  ${datetimeLocal}  ${durationSec.toFixed(1)}s${waveformPath ? "  waveform OK" : "  no waveform"}`);
   }
 
-  // waveKeySet no longer needed — remove unused variable warning
-  void waveKeySet;
-
-  entries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
-
-  await uploadBuffer(JSON.stringify(entries, null, 2) + "\n", CFG.samplesIndexKey);
-
-  log(`Done. Wrote ${entries.length} entries to ${CFG.samplesIndexKey} (${skipped} skipped).`);
+  return options;
 }
 
-main().catch(e => { err(e); process.exit(1); });
+/**
+ * Read audiowaveform's effective pixels-per-second metadata.
+ * Older/alternate writers may expose the direct value; standard
+ * audiowaveform JSON derives it from sample_rate / samples_per_pixel.
+ */
+export function waveformPixelsPerSecond(waveform) {
+  if (!waveform || typeof waveform !== "object") return null;
+  const direct = Number(
+    waveform.pixels_per_second
+    ?? waveform.pixelsPerSecond,
+  );
+  if (Number.isFinite(direct) && direct > 0) return direct;
+
+  const sampleRate = Number(waveform.sample_rate ?? waveform.sampleRate);
+  const samplesPerPixel = Number(
+    waveform.samples_per_pixel
+    ?? waveform.samplesPerPixel,
+  );
+  if (
+    !Number.isFinite(sampleRate)
+    || sampleRate <= 0
+    || !Number.isFinite(samplesPerPixel)
+    || samplesPerPixel <= 0
+  ) return null;
+  return sampleRate / samplesPerPixel;
+}
+
+function isTargetResolution(value, target) {
+  return Number.isFinite(value) && Math.abs(value - target) < 0.01;
+}
+
+function resolutionDescription(value) {
+  return Number.isFinite(value) ? `${value.toFixed(2)} px/s` : "unknown resolution";
+}
+
+function timestamp() {
+  return new Date().toISOString();
+}
+
+function log(...values) {
+  console.log(`[${timestamp()}]`, ...values);
+}
+
+function error(...values) {
+  console.error(`[${timestamp()}] ERROR`, ...values);
+}
+
+async function readExistingWaveform(mc, cfg, waveformPath) {
+  if (!waveformPath) return { waveform: null, readError: null };
+  try {
+    return {
+      waveform: await loadJson(mc, cfg.bucket, waveformPath, null),
+      readError: null,
+    };
+  } catch (readError) {
+    return { waveform: null, readError };
+  }
+}
+
+async function regenerateSampleWaveform(mc, cfg, sample, targetPps) {
+  if (!sample.audioPath) throw new Error("sample has no audioPath");
+  if (!sample.waveformPath) throw new Error("sample has no waveformPath");
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-waveform-migration-"));
+  try {
+    const extension = path.extname(sample.audioPath) || ".audio";
+    const tmpAudio = path.join(tmpDir, `${sample.id}${extension}`);
+    const tmpWaveform = path.join(tmpDir, `${sample.id}.json`);
+    await download(mc, cfg.bucket, sample.audioPath, tmpAudio);
+    if (!generateWaveform(
+      cfg.audiowaveformBin,
+      tmpAudio,
+      tmpWaveform,
+      16,
+      targetPps,
+    )) {
+      throw new Error("audiowaveform failed");
+    }
+
+    const generated = JSON.parse(fs.readFileSync(tmpWaveform, "utf8"));
+    const generatedPps = waveformPixelsPerSecond(generated);
+    if (!isTargetResolution(generatedPps, targetPps)) {
+      throw new Error(
+        `generated waveform reports ${resolutionDescription(generatedPps)}, expected ${targetPps} px/s`,
+      );
+    }
+
+    // MinIO object replacement is atomic: the existing object remains
+    // available until this complete generated file is successfully uploaded.
+    await upload(mc, cfg.bucket, tmpWaveform, sample.waveformPath, "application/json");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export async function main(args = process.argv.slice(2)) {
+  const options = parseWaveformMigrationArgs(args);
+  if (options.help) {
+    console.log(usage());
+    return 0;
+  }
+
+  const cfg = buildConfig();
+  const targetPps = DEFAULT_WAVEFORM_PIXELS_PER_SECOND;
+  const mc = createClient(cfg.minio);
+  const db = openReadonlyDb(cfg.dbPath);
+  const counts = {
+    inspected: 0,
+    matching: 0,
+    planned: 0,
+    updated: 0,
+    failed: 0,
+  };
+
+  try {
+    if (!await mc.bucketExists(cfg.bucket)) {
+      throw new Error(`bucket does not exist: ${cfg.bucket}`);
+    }
+
+    const allSamples = listActiveSamples(db);
+    const samples = allSamples.slice(0, options.limit);
+    log(`Training waveform migration to ${targetPps} px/s`);
+    log(`Mode: ${options.apply ? "APPLY" : "DRY RUN"}${options.force ? " (force all)" : ""}`);
+    log(`Active samples: ${allSamples.length}; inspecting: ${samples.length}`);
+
+    for (let index = 0; index < samples.length; index++) {
+      const sample = samples[index];
+      const prefix = `[${index + 1}/${samples.length}] ${sample.id}`;
+      counts.inspected++;
+
+      if (!sample.waveformPath) {
+        counts.failed++;
+        error(`${prefix}: no waveformPath in SQLite; skipped`);
+        continue;
+      }
+
+      const { waveform, readError } = await readExistingWaveform(mc, cfg, sample.waveformPath);
+      const existingPps = waveformPixelsPerSecond(waveform);
+      if (!options.force && isTargetResolution(existingPps, targetPps)) {
+        counts.matching++;
+        log(`${prefix}: SKIP already ${targetPps} px/s`);
+        continue;
+      }
+
+      counts.planned++;
+      const reason = options.force
+        ? "forced"
+        : readError
+          ? `unreadable waveform: ${readError.message}`
+          : waveform
+            ? resolutionDescription(existingPps)
+            : "missing waveform";
+
+      if (!options.apply) {
+        log(`${prefix}: WOULD UPDATE (${reason})`);
+        continue;
+      }
+
+      try {
+        await regenerateSampleWaveform(mc, cfg, sample, targetPps);
+        counts.updated++;
+        log(`${prefix}: UPDATED from ${reason}`);
+      } catch (migrationError) {
+        counts.failed++;
+        error(`${prefix}: ${migrationError.message}`);
+      }
+    }
+
+    if (options.apply) {
+      await saveJson(
+        mc,
+        cfg.bucket,
+        cfg.samplesIndexKey,
+        exportSamplesIndexJson(db),
+      );
+      log(`Republished ${cfg.samplesIndexKey} from SQLite`);
+    }
+
+    log(
+      `Done: inspected=${counts.inspected}, matching=${counts.matching}, `
+      + `planned=${counts.planned}, updated=${counts.updated}, failed=${counts.failed}`,
+    );
+    return counts.failed > 0 ? 1 : 0;
+  } finally {
+    db.close();
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().then(
+    (exitCode) => {
+      process.exitCode = exitCode;
+    },
+    (migrationError) => {
+      error(migrationError.stack ?? migrationError.message);
+      process.exitCode = 1;
+    },
+  );
+}
