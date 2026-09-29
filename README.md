@@ -183,7 +183,7 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |
 | `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |
 | `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
-| `POST /api/annotations/:id/window-review` | Keep or atomically trim/split a projection-matched bark/yap fragment |
+| `POST /api/annotations/:id/window-review` | Keep, unkeep, or atomically trim/split a projection-matched bark/yap fragment |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
 
 Bulk hit-metadata responses contain `items`, pagination fields including

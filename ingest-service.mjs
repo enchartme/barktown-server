@@ -197,7 +197,7 @@ async function processTrainingSample(obj) {
     // Waveform (always generated — samples are short enough to be worth it).
     const waveformFilename = `${id}.json`;
     const tmpWaveform      = path.join(tmpDir, waveformFilename);
-    if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16, 50)) {
+    if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16)) {
       throw new Error("audiowaveform failed; sample left in upload-here");
     }
     const waveformPath = plan.waveformPath;
@@ -355,7 +355,7 @@ async function processFile(obj) {
         }
         waveformInput = tmpWav;
       }
-      if (!generateWaveform(CFG.audiowaveformBin, waveformInput, tmpWaveform, 16, 50)) {
+      if (!generateWaveform(CFG.audiowaveformBin, waveformInput, tmpWaveform, 16)) {
         throw new Error(`audiowaveform failed for "${filename}" — leaving in upload-here/`);
       }
       const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;

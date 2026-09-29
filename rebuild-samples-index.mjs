@@ -111,7 +111,7 @@ async function uploadBuffer(data, objectKey) {
 function generateWaveform(audioPath, outPath) {
   const r = spawnSync(
     process.env.AUDIOWAVEFORM_BIN ?? "audiowaveform",
-    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "50", "--bits", "16"],
+    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "100", "--bits", "16"],
     { encoding: "utf8" }
   );
   if (r.error || r.status !== 0) {

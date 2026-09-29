@@ -165,7 +165,7 @@ function validateExpectedFragment(expected) {
 }
 
 function validateWindowReviewProposal(action, expected, proposal, durationSec) {
-  if (action === "keep") return null;
+  if (action === "keep" || action === "unkeep") return null;
   if (!proposal || !Array.isArray(proposal.fragments)) {
     return "proposal.fragments is required";
   }
@@ -543,7 +543,7 @@ async function ensureSampleWaveform({ sourceWaveformKey, audioKey, waveformKey, 
       const tmpAudio = path.join(tmpDir, path.basename(audioKey));
       const tmpWaveform = path.join(tmpDir, `${sampleId}.json`);
       await download(mc, CFG.bucket, audioKey, tmpAudio);
-      if (!generateWaveform(CFG.audiowaveformBin, tmpAudio, tmpWaveform, 16, 50)) {
+      if (!generateWaveform(CFG.audiowaveformBin, tmpAudio, tmpWaveform, 16)) {
         throw new Error("audiowaveform failed");
       }
       await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
@@ -1636,9 +1636,9 @@ privateApi.post("/api/annotations/:annotationId/window-review", async (req, repl
   }
 
   const { action, expected, proposal } = req.body ?? {};
-  if (!["keep", "trim-start", "trim-end", "split-trim"].includes(action)) {
+  if (!["keep", "unkeep", "trim-start", "trim-end", "split-trim"].includes(action)) {
     reply.code(400);
-    return { error: "action must be keep, trim-start, trim-end, or split-trim" };
+    return { error: "action must be keep, unkeep, trim-start, trim-end, or split-trim" };
   }
   const expectedError = validateExpectedFragment(expected);
   if (expectedError) {

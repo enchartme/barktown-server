@@ -698,6 +698,23 @@ test("window review keeps fragments persistently and clears keep after editing",
   assert.equal(keep.status, 200);
   assert.equal((await keep.json()).annotations[0].windowReview, "keep");
 
+  const unkeep = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "unkeep", expected }),
+  });
+  assert.equal(unkeep.status, 200);
+  const unkept = (await unkeep.json()).annotations[0];
+  assert.equal(unkept.windowReview, null);
+  assert.equal(unkept.windowReviewedAt, null);
+
+  const keepAgain = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}/window-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "keep", expected }),
+  });
+  assert.equal(keepAgain.status, 200);
+
   const edit = await fetch(`${privateServer.baseUrl}/api/annotations/${fragment.id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
