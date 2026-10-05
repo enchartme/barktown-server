@@ -42,6 +42,7 @@ import { canonicalizeAutoDetectionId, parseSampleFilename } from "./lib/filename
 import {
   availableSourceWavPath,
   buildDiarySampleMove,
+  existingDiarySampleConflict,
   sourceWavKeyCandidatesForEntry,
 } from "./lib/diary-samples.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
@@ -1160,19 +1161,20 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   // A repeated request may be finishing a partial attempt, so validate the
   // identity but continue through object verification and diary cleanup.
   const existingSample = getSample(db, move.sampleId);
-  if (existingSample && existingSample.status !== "active") {
+  const linkedDiaryExists = Boolean(
+    existingSample?.diaryId
+    && existingSample.diaryId !== entry.id
+    && getDiaryEntry(db, existingSample.diaryId),
+  );
+  const existingSampleConflict = existingDiarySampleConflict(
+    existingSample,
+    entry,
+    move,
+    { linkedDiaryExists },
+  );
+  if (existingSampleConflict) {
     reply.code(409);
-    return { error: `sample id already exists but is inactive: ${existingSample.id}` };
-  }
-  if (existingSample?.status === "active") {
-    if (existingSample.diaryId !== entry.id) {
-      reply.code(409);
-      return { error: `sample id already belongs to another recording: ${existingSample.id}` };
-    }
-    if (existingSample.audioPath !== move.destinationKey) {
-      reply.code(409);
-      return { error: `sample id points at a different audio object: ${existingSample.audioPath}` };
-    }
+    return { error: existingSampleConflict };
   }
 
   let sourceStat;
@@ -1236,13 +1238,25 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
     durationSec: entry.durationSec ?? 0,
     diaryId: entry.id,
   });
-  const storedSample = getSample(db, move.sampleId);
-  if (!storedSample || storedSample.diaryId !== entry.id) {
+  let storedSample = getSample(db, move.sampleId);
+  if (!storedSample) {
     reply.code(409);
     return { error: `sample id already belongs to another recording: ${move.sampleId}` };
   }
-  if (!sampleCreated && storedSample.waveformPath !== move.waveformKey) {
-    upsertSample(db, { ...storedSample, waveformPath: move.waveformKey });
+  if (
+    !sampleCreated
+    && (storedSample.waveformPath !== move.waveformKey || storedSample.diaryId !== entry.id)
+  ) {
+    upsertSample(db, {
+      ...storedSample,
+      waveformPath: move.waveformKey,
+      diaryId: entry.id,
+    });
+    storedSample = getSample(db, move.sampleId);
+  }
+  if (storedSample.diaryId !== entry.id) {
+    reply.code(409);
+    return { error: `sample id already belongs to another recording: ${move.sampleId}` };
   }
 
   // Only the request that created the deterministic sample row may copy

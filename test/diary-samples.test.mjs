@@ -5,6 +5,7 @@ import {
   archiveSourceKeyCandidatesForEntry,
   archiveSourceKeyForEntry,
   buildDiarySampleMove,
+  existingDiarySampleConflict,
   sourceWavKeyCandidatesForEntry,
 } from "../lib/diary-samples.mjs";
 import { parseShortFilename } from "../lib/filenames.mjs";
@@ -106,4 +107,46 @@ test("an explicit or linked source survives a malformed legacy audio path", () =
     sampleAudioPath: "training-samples/bark/sample.wav",
   };
   assert.deepEqual(sourceWavKeyCandidatesForEntry(linked, cfg), [linked.sampleAudioPath]);
+});
+
+test("a deterministic existing sample can reclaim a missing or orphaned diary link", () => {
+  const move = buildDiarySampleMove(entry, "background", cfg);
+  const existing = {
+    id: move.sampleId,
+    status: "active",
+    audioPath: move.destinationKey,
+    datetimeLocal: entry.datetimeLocal,
+    diaryId: null,
+  };
+
+  assert.equal(existingDiarySampleConflict(existing, { ...entry, id: "diary-1" }, move), null);
+  assert.equal(existingDiarySampleConflict(
+    { ...existing, diaryId: "deleted-diary" },
+    { ...entry, id: "diary-1" },
+    move,
+    { linkedDiaryExists: false },
+  ), null);
+});
+
+test("a deterministic sample link is never stolen from another existing diary", () => {
+  const move = buildDiarySampleMove(entry, "background", cfg);
+  const existing = {
+    id: move.sampleId,
+    status: "active",
+    audioPath: move.destinationKey,
+    datetimeLocal: entry.datetimeLocal,
+    diaryId: "other-diary",
+  };
+
+  assert.match(existingDiarySampleConflict(
+    existing,
+    { ...entry, id: "diary-1" },
+    move,
+    { linkedDiaryExists: true },
+  ), /belongs to another recording/);
+  assert.match(existingDiarySampleConflict(
+    { ...existing, audioPath: "training-samples/background/other.wav", diaryId: null },
+    { ...entry, id: "diary-1" },
+    move,
+  ), /different audio object/);
 });

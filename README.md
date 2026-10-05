@@ -122,6 +122,22 @@ waveforms too. Apply mode overwrites only each sample's existing waveform
 object and republishes `training-samples-index.json` from SQLite; it does not
 change sample rows or discover samples by scanning object storage.
 
+### Repair sample/diary connections
+
+`repair-sample-diary-links.mjs` audits the relationship in both directions.
+The stored link is `samples.diary_id`; the diary's `sampleId` is derived from
+that field. The script matches the two tables by their local timestamp down to
+the second, reports targets missing on either side, and refuses to guess when a
+timestamp is duplicated. It is read-only unless `--apply` is supplied:
+
+```bash
+npm run repair-sample-diary-links
+npm run repair-sample-diary-links -- --apply
+```
+
+Use `--db PATH` to inspect a specific database. Apply mode changes only safe,
+one-to-one active-sample links and verifies the result after committing.
+
 Pending guarded one-time operations live under `migrations/`; completed
 operations and their tests are retained under `archive/`. The current
 auto-detection canonical-name migration is documented in
