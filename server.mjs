@@ -63,7 +63,11 @@ import {
   listMonitorParams, getMonitorParamsMap, setMonitorParam,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
-import { generateWaveform, getDuration } from "./lib/audio.mjs";
+import {
+  DEFAULT_WAVEFORM_PIXELS_PER_SECOND,
+  generateWaveform,
+  getDuration,
+} from "./lib/audio.mjs";
 import { hitMetadataReviewFragments, hitMetadataTrainingReviewFragments } from "./lib/hit-annotations.mjs";
 
 const CFG = buildConfig();
@@ -1309,8 +1313,8 @@ privateApi.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   };
 });
 
-// Regenerate the waveform for a training sample at a higher pixels-per-second
-// resolution, replacing the existing waveform object in MinIO and updating the DB.
+// Regenerate a training sample's waveform, replacing the object in MinIO and
+// repairing every stored reference to its canonical key.
 privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
@@ -1319,7 +1323,9 @@ privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
   }
 
   const ALLOWED_PPS = [20, 50, 100];
-  const pps = Number(req.body?.pixelsPerSecond);
+  const pps = req.body?.pixelsPerSecond === undefined
+    ? DEFAULT_WAVEFORM_PIXELS_PER_SECOND
+    : Number(req.body.pixelsPerSecond);
   if (!ALLOWED_PPS.includes(pps)) {
     reply.code(400);
     return { error: `pixelsPerSecond must be one of: ${ALLOWED_PPS.join(", ")}` };
@@ -1342,6 +1348,7 @@ privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
     await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
 
     upsertSample(db, { ...sample, waveformPath: waveformKey });
+    await refreshSamplesIndex();
 
     log(`Regenerated waveform for ${sample.id} at ${pps} px/s`);
     return { waveformPath: waveformKey };
