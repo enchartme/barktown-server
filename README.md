@@ -183,11 +183,6 @@ npm run server:private
 | `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
 | `GET /api/data-quality` | List timeboxed capture-integrity and XRUN facts, with inclusive `startDate`/`endDate` filters and 1-based pagination (max `pageSize` 1000) |
 | `GET /api/diary/:id/data-quality` | Get timeboxed capture-integrity and XRUN facts for one recording |
-| `GET /api/samples` | List active training samples (`?label=bark` to filter) |
-| `GET /api/samples/:id` | Get one sample |
-| `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
-| `GET /api/samples/:id/data-quality` | Get capture-integrity facts retained with a moved sample |
-| `GET /api/annotations` | List every annotation across all samples in one request (includes each annotation's sample `audioPath`/`durationSec`) — for laptop-side training export tooling |
 
 Public responses send `Cache-Control: no-store`; filtering and freshness come
 from live database queries rather than an independently cached data dump.
@@ -201,6 +196,11 @@ unlinked recordings expose the equivalent diary-scoped notes.
 |---|---|
 | `GET /health` | Liveness check |
 | `GET /api/monitor-params` | List Goblin monitor parameters |
+| `GET /api/samples` | List active training samples (`?label=bark` to filter) |
+| `GET /api/samples/:id` | Get one sample |
+| `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
+| `GET /api/samples/:id/data-quality` | Get capture-integrity facts retained with a moved sample |
+| `GET /api/annotations` | List every training annotation with sample audio paths/durations for laptop-side export tooling |
 | `PUT /api/diary/:id/comment` | Add or replace the whole-recording note, using the linked sample annotation when available |
 | `DELETE /api/diary/:id/comment` | Clear the whole-recording note from the diary entry or its linked sample |
 | `PATCH /api/diary/:id/trim` | Persist or clear non-destructive `trimStartMs`/`trimStopMs` playback bounds |
@@ -218,6 +218,12 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
 | `POST /api/annotations/:id/window-review` | Keep, unkeep, or atomically trim/split a projection-matched bark/yap fragment |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
+
+Training metadata routes return 404 on the public API. The training UI and
+`barktown-utils/tools/export_fragments.py` read them through the Tailnet base
+`https://masmopi.tail523149.ts.net`. Storage asset permissions are unchanged.
+After deploying this boundary change, purge any previously cached public
+training API responses from Cloudflare.
 
 Bulk hit-metadata responses contain `items`, pagination fields including
 `hasNextPage`, `isLastPage`, and `complete`, plus `links.next`/`links.previous`.

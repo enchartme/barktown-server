@@ -92,7 +92,7 @@ function runExport(extraArgs = []) {
   return new Promise((resolve, reject) => {
     const proc = spawn("python3", [
       EXPORT_SCRIPT,
-      "--ingest-base", publicServer.baseUrl,
+      "--ingest-base", privateServer.baseUrl,
       "--asset-base", assetServer.baseUrl,
       "--training-data", trainingDataDir,
       "--cache-dir", cacheDir,
