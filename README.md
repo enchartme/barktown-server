@@ -510,3 +510,8 @@ Examples of valid names:
 2025-12-11 05-32-00.aac
 2026-02-07 17-25-00 barks and yaps.m4a
 ```
+
+## Production deployment
+
+See [the Pi and Dokploy runbook](deploy/README.md) for a fresh installation,
+restoring SQLite and MinIO, or redeploying an existing Barktown service.

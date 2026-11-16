@@ -29,6 +29,7 @@ RUN set -eu; \
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json server.mjs server-private.mjs ingest-service.mjs dump-db.mjs ./
 COPY lib ./lib
+COPY deploy/database.mjs deploy/require-db.sh ./deploy/
 USER node
 # Fail the image build if the runtime cannot open and query SQLite.
 RUN node --input-type=module -e 'import Database from "better-sqlite3"; const db = new Database(":memory:"); console.log(db.prepare("SELECT sqlite_version() AS sqlite").get()); db.close()'

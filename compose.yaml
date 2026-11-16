@@ -4,6 +4,7 @@ x-runtime: &runtime
     context: .
   pull_policy: build
   init: true
+  entrypoint: ["/bin/sh", "/app/deploy/require-db.sh"]
   user: "${BARKTOWN_UID:-1000}:${BARKTOWN_GID:-1000}"
   restart: unless-stopped
   extra_hosts:
