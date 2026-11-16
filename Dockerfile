@@ -6,6 +6,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
+# The bundled Linux addon can require a newer glibc than Bookworm provides.
+RUN rm -f node_modules/better-sqlite3/prebuilds/*.node \
+    && node "$(npm root -g)/npm/node_modules/node-gyp/bin/node-gyp.js" rebuild \
+        --directory node_modules/better-sqlite3 --release --nodedir=/usr/local
 
 FROM node:24-bookworm-slim
 ARG AUDIOWAVEFORM_VERSION=1.10.1
@@ -26,4 +30,6 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json server.mjs server-private.mjs ingest-service.mjs dump-db.mjs ./
 COPY lib ./lib
 USER node
+# Fail the image build if the runtime cannot open and query SQLite.
+RUN node --input-type=module -e 'import Database from "better-sqlite3"; const db = new Database(":memory:"); console.log(db.prepare("SELECT sqlite_version() AS sqlite").get()); db.close()'
 CMD ["node", "server.mjs"]
