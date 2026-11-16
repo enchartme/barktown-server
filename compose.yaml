@@ -1,0 +1,85 @@
+x-runtime: &runtime
+  image: barktown-server:${BARKTOWN_IMAGE_TAG:-staging}
+  build:
+    context: .
+  pull_policy: build
+  init: true
+  user: "${BARKTOWN_UID:-1000}:${BARKTOWN_GID:-1000}"
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - type: bind
+      source: ${BARKTOWN_DATA_DIR:?Set BARKTOWN_DATA_DIR to an existing data directory}
+      target: /data
+      bind:
+        create_host_path: false
+
+x-storage-env: &storage-env
+  DB_PATH: /data/barktown.db
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-host.docker.internal}
+  MINIO_PORT: ${MINIO_PORT:-9000}
+  MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+  MINIO_BUCKET: ${MINIO_BUCKET:?Set MINIO_BUCKET to the intended bucket}
+
+x-healthcheck: &healthcheck
+  interval: 10s
+  timeout: 4s
+  retries: 5
+  start_period: 10s
+
+services:
+  public-api:
+    <<: *runtime
+    command: ["node", "server.mjs"]
+    environment:
+      <<: *storage-env
+      BARKTOWN_API_MODE: public
+      PUBLIC_API_HOST: 0.0.0.0
+      PUBLIC_API_PORT: "8091"
+      MINIO_ACCESS_KEY: ${PUBLIC_MINIO_ACCESS_KEY:?Set PUBLIC_MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${PUBLIC_MINIO_SECRET_KEY:?Set PUBLIC_MINIO_SECRET_KEY}
+    ports:
+      - "127.0.0.1:${BARKTOWN_PUBLIC_HOST_PORT:-28091}:8091"
+    networks: [public-api]
+    depends_on:
+      private-api:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+
+  private-api:
+    <<: *runtime
+    command: ["node", "server-private.mjs"]
+    env_file: .env
+    environment:
+      <<: *storage-env
+      PRIVATE_API_HOST: 0.0.0.0
+      PRIVATE_API_PORT: "8090"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
+    ports:
+      - "127.0.0.1:${BARKTOWN_PRIVATE_HOST_PORT:-28090}:8090"
+    networks: [private-api]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+
+  ingest:
+    <<: *runtime
+    command: ["node", "ingest-service.mjs"]
+    env_file: .env
+    environment:
+      <<: *storage-env
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
+    networks: [ingest]
+    depends_on:
+      private-api:
+        condition: service_healthy
+
+networks:
+  public-api:
+  private-api:
+  ingest:

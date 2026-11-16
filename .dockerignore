@@ -1,0 +1,11 @@
+.git
+**/.env
+**/.env.*
+**/*.env
+**/node_modules
+data
+logs
+**/*.db*
+**/*.sqlite*
+**/*.key
+**/*.pem
