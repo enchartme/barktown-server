@@ -60,7 +60,36 @@ The old Pi hostname on HTTPS port 443 is not a Barktown endpoint. If the
 temporary `barktown-private-redirect.yml` remains in Dokploy's Traefik dynamic
 directory, move it out after updating the clients to the named Service.
 
-**Re-analyze:** this base image does not bundle Goblin's Python runtime or models. If you need re-analysis in production, provision a container-compatible Goblin runtime plus its models, configure the three `REANALYZE_*` paths in the private API, and run a real re-analysis before retiring the old setup. A host Python virtualenv should not be assumed to work inside the image.
+### Re-analyze
+
+The image includes Python, NumPy and LiteRT. It doesn't need the host Python
+virtualenv, and Dokploy doesn't need access to the Goblin repository to build
+Barktown. Supply the analyzer and its model assets as a read-only mount.
+
+1. Run as the Barktown data owner from this server checkout:
+   `bash deploy/prepare-goblin-assets.sh /home/pi/git/enchartme/barktown-goblin`.
+   The command copies analyzer code at the checkout's Git commit and packages
+   the active model files, recording their checksums. By default it reads the
+   Goblin checkout's `models/`; pass a second path if your models are stored
+   elsewhere. A restored or new host needs the deployed classifier and its
+   matching metadata, plus the embeddings variant of YAMNet (see the Goblin
+   repo's `tools/download_models.py`). Keep a backup of the asset bundle.
+2. Paste the printed `BARKTOWN_GOBLIN_DIR=...` line into the production Compose
+   Environment and deploy. Keep `REANALYZE_CONCURRENCY` if you already tune it.
+   Compose sets the Python, script and model paths inside the private container;
+   remove any old host-side path overrides from Dokploy.
+3. In Dokploy's private API container terminal, check that the runtime can load
+   both models before trying a real recording:
+
+   ```bash
+   cd /opt/barktown-goblin
+   /opt/barktown-reanalysis/bin/python -B -c 'from bark.classifier import BarkClassifier; BarkClassifier(model_dir="models", num_threads=1); print("Barktown models loaded")'
+   ```
+
+4. Re-analyze one known recording with a source WAV in the private UI. This
+   updates its stored hit metadata. Leave `BARKTOWN_GOBLIN_DIR` unset on
+   deployments that don't need re-analysis; the other functions still work.
+   To roll back a model update, set it back to the previous bundle and redeploy.
 
 ## Redeploy, backup and rollback
 

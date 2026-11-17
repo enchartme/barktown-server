@@ -10,7 +10,8 @@ x-runtime: &runtime
   extra_hosts:
     - "host.docker.internal:host-gateway"
   volumes:
-    - type: bind
+    - &database-mount
+      type: bind
       source: ${BARKTOWN_DATA_DIR:?Set BARKTOWN_DATA_DIR to an existing data directory}
       target: /data
       bind:
@@ -57,11 +58,18 @@ services:
   private-api:
     <<: *runtime
     command: ["node", "server-private.mjs"]
+    volumes:
+      - *database-mount
+      - "${BARKTOWN_GOBLIN_DIR:-goblin-assets}:/opt/barktown-goblin:ro"
     env_file: .env
     environment:
       <<: *storage-env
       PRIVATE_API_HOST: 0.0.0.0
       PRIVATE_API_PORT: "8090"
+      REANALYZE_PYTHON_BIN: /opt/barktown-reanalysis/bin/python
+      REANALYZE_SCRIPT_PATH: /opt/barktown-goblin/tools/analyze_wav.py
+      REANALYZE_MODEL_DIR: /opt/barktown-goblin/models
+      PYTHONDONTWRITEBYTECODE: "1"
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
     ports:
@@ -88,3 +96,6 @@ networks:
   public-api:
   private-api:
   ingest:
+
+volumes:
+  goblin-assets:

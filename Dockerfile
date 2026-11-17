@@ -18,7 +18,7 @@ RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in arm64|amd64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; esac; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl ffmpeg; \
+    apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 python3-venv; \
     curl -fsSL --retry 3 \
       "https://github.com/bbc/audiowaveform/releases/download/${AUDIOWAVEFORM_VERSION}/audiowaveform_${AUDIOWAVEFORM_VERSION}-1-12_${arch}.deb" \
       -o /tmp/audiowaveform.deb; \
@@ -26,11 +26,16 @@ RUN set -eu; \
     rm -f /tmp/audiowaveform.deb; \
     rm -rf /var/lib/apt/lists/*
 
+COPY deploy/requirements-reanalysis.txt ./deploy/
+RUN python3 -m venv /opt/barktown-reanalysis \
+    && /opt/barktown-reanalysis/bin/python -m pip install --no-cache-dir --only-binary=:all: -r deploy/requirements-reanalysis.txt
+
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json server.mjs server-private.mjs ingest-service.mjs dump-db.mjs ./
 COPY lib ./lib
 COPY deploy/database.mjs deploy/require-db.sh ./deploy/
 USER node
+RUN /opt/barktown-reanalysis/bin/python -c 'import numpy; from ai_edge_litert.interpreter import Interpreter'
 # Fail the image build if the runtime cannot open and query SQLite.
 RUN node --input-type=module -e 'import Database from "better-sqlite3"; const db = new Database(":memory:"); console.log(db.prepare("SELECT sqlite_version() AS sqlite").get()); db.close()'
 CMD ["node", "server.mjs"]
