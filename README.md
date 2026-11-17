@@ -219,9 +219,10 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `POST /api/annotations/:id/window-review` | Keep, unkeep, or atomically trim/split a projection-matched bark/yap fragment |
 | `DELETE /api/annotations/:id` | Delete a fragment annotation |
 
-Training metadata routes return 404 on the public API. The training UI and
-`barktown-utils/tools/export_fragments.py` read them through the Tailnet base
-`https://masmopi.tail523149.ts.net`. Storage asset permissions are unchanged.
+Training metadata routes return 404 on the public API. The training UI uses
+the named Tailscale endpoint `https://barktown-private.tail523149.ts.net`.
+Use the same endpoint for `barktown-utils/tools/export_fragments.py` via
+`--ingest-base` or `INGEST_API_BASE`. Storage asset permissions are unchanged.
 After deploying this boundary change, purge any previously cached public
 training API responses from Cloudflare.
 
@@ -348,9 +349,10 @@ sudo systemctl enable --now barktown-api barktown-api-private
 ```
 
 Configure cloudflared to route `barktown-api.enchart.me` to
-`http://127.0.0.1:8091`. The existing Tailscale Serve route for
-`masmopi.tail523149.ts.net` can remain on `http://127.0.0.1:8090`. Do not
-publish the private port through cloudflared.
+`http://127.0.0.1:8091`. Configure the named Tailscale Service
+`svc:barktown-private` (`https://barktown-private.tail523149.ts.net`)
+to forward HTTPS to `http://127.0.0.1:8090`. Do not publish the private port
+through cloudflared.
 
 Once the units are installed, control the complete three-service stack with:
 

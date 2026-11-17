@@ -55,7 +55,10 @@ The tool runs from the production image as your host user, with no network. It v
 | Private API | Named Tailscale Service `svc:barktown-private`, virtual TCP 443 with HTTPS → `http://127.0.0.1:8090`. Approve only the correct service host and grant access only to intended clients; the API has no app-level login. |
 | Ingest | No inbound route. It polls the configured MinIO bucket. |
 
-The recommended private base URL is the named Service, currently `https://barktown-private.tail523149.ts.net`. Browser callers that still use the old Pi hostname and Traefik's cross-port redirect can fail CORS; check their configured URL before relying on them. Keep that old redirect separate from the production deployment.
+The private base URL is the named Service, `https://barktown-private.tail523149.ts.net`.
+The old Pi hostname on HTTPS port 443 is not a Barktown endpoint. If the
+temporary `barktown-private-redirect.yml` remains in Dokploy's Traefik dynamic
+directory, move it out after updating the clients to the named Service.
 
 **Re-analyze:** this base image does not bundle Goblin's Python runtime or models. If you need re-analysis in production, provision a container-compatible Goblin runtime plus its models, configure the three `REANALYZE_*` paths in the private API, and run a real re-analysis before retiring the old setup. A host Python virtualenv should not be assumed to work inside the image.
 
