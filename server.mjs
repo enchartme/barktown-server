@@ -50,6 +50,7 @@ import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
 import {
   createReanalysisLimiter,
   ReanalysisAlreadyRunningError,
+  workersForReanalysis,
 } from "./lib/reanalysis-limiter.mjs";
 import {
   openDb, openReadonlyDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
@@ -485,13 +486,10 @@ const REANALYZE_TUNING_FIELDS = {
 
 const BULK_REANALYZE_MODE_HEADER = "x-barktown-reanalysis-mode";
 
-/**
- * Interactive work reserves the full CPU budget for one file. The bulk CLI
- * marks its requests so each file reserves one slot and the CLI can spread the
- * same budget across files.
- */
 function reanalyzeWorkersForRequest(req) {
-  return req.headers[BULK_REANALYZE_MODE_HEADER] === "bulk" ? 1 : CFG.reanalyze.concurrency;
+  return workersForReanalysis(CFG.reanalyze, {
+    bulk: req.headers[BULK_REANALYZE_MODE_HEADER] === "bulk",
+  });
 }
 
 /** Validate optional detection-tuning overrides. Returns an error string, or null if valid. */
@@ -1716,7 +1714,9 @@ try {
   log(`${serviceName} listening on http://${host}:${port}`);
   log(`  access: ${isPublicApi ? "anonymous read-only" : "Tailnet private"}`);
   log(`  db: ${CFG.dbPath}`);
-  if (!isPublicApi) log(`  re-analysis CPU slots: ${CFG.reanalyze.concurrency}`);
+  if (!isPublicApi) {
+    log(`  re-analysis CPU slots: ${CFG.reanalyze.concurrency}; workers per interactive job: ${workersForReanalysis(CFG.reanalyze)}`);
+  }
 } catch (e) {
   err(e);
   process.exit(1);

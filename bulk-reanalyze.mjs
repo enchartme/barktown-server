@@ -34,7 +34,7 @@ const privateApiBase = (
   ?? process.env.BULK_REANALYZE_API_URL
   ?? `http://127.0.0.1:${privatePort}`
 ).replace(/\/$/, "");
-const concurrency = Number.parseInt(process.env.REANALYZE_CONCURRENCY ?? "4", 10);
+const concurrency = Number.parseInt(process.env.REANALYZE_CONCURRENCY ?? "1", 10);
 if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
   console.error("REANALYZE_CONCURRENCY must be a positive integer.");
   process.exit(2);

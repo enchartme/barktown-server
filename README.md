@@ -305,15 +305,15 @@ The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits wor
 `http://127.0.0.1:$PRIVATE_API_PORT`. It uses the same
 `REANALYZE_CONCURRENCY` CPU-slot budget as the private API. Set the two
 `BULK_REANALYZE_*_API_URL` variables only when either API is at another
-address. Changing `REANALYZE_CONCURRENCY` requires a
-`barktown-api-private` restart.
+address. Changes to these limits take effect after the private API is restarted
+or redeployed.
 
-Interactive diary and training re-analysis reserve the complete budget and
-split one file's deterministic window grid across that many Goblin workers.
-The bulk CLI marks its requests as bulk, starts up to the configured number of
-files concurrently, and each file reserves one slot. The private API uses a
-weighted FIFO limiter, so overlapping interactive and bulk requests cannot
-exceed the configured CPU budget.
+By default, re-analysis runs one worker at a time. `REANALYZE_CONCURRENCY`
+controls how many worker slots may be active across all requests.
+`REANALYZE_WORKERS_PER_JOB` limits the workers for one interactive diary or
+training re-analysis and never exceeds the shared budget. Bulk requests use
+one worker per file. Each worker loads its own model pair; keep both settings
+at `1` on the Pi unless parallel runs have been tested.
 
 For the server-side Python environment, TFLite runtime, model bundle, systemd
 wiring, and smoke-test procedure, follow Goblin's
@@ -335,7 +335,8 @@ a best-effort basis (the database is the source of truth, and
 | `REANALYZE_TIMEOUT_MS` | `300000` | Maximum time for one synchronous re-analysis request |
 | `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Kill an analyzer whose JSON/stdout exceeds this size |
 | `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
-| `REANALYZE_CONCURRENCY` | `4` | Shared CPU-slot budget: workers within one interactive file, or concurrent one-worker files in bulk mode |
+| `REANALYZE_CONCURRENCY` | `1` | Total active worker slots across all requests |
+| `REANALYZE_WORKERS_PER_JOB` | `1` | Workers for one interactive request, capped by the total; bulk requests always use one |
 | `BULK_REANALYZE_PUBLIC_API_URL` | `http://127.0.0.1:$PUBLIC_API_PORT` | Read API used by `npm run bulk-reanalyze` |
 | `BULK_REANALYZE_PRIVATE_API_URL` | `http://127.0.0.1:$PRIVATE_API_PORT` | Mutation API used by `npm run bulk-reanalyze` |
 

@@ -75,7 +75,9 @@ Barktown. Supply the analyzer and its model assets as a read-only mount.
    matching metadata, plus the embeddings variant of YAMNet (see the Goblin
    repo's `tools/download_models.py`). Keep a backup of the asset bundle.
 2. Paste the printed `BARKTOWN_GOBLIN_DIR=...` line into the production Compose
-   Environment and deploy. Keep `REANALYZE_CONCURRENCY` if you already tune it.
+   Environment. Set `REANALYZE_CONCURRENCY=1` and
+   `REANALYZE_WORKERS_PER_JOB=1` on the Pi, then deploy. Each worker loads
+   a separate pair of models. The private API logs both effective limits at startup.
    Compose sets the Python, script and model paths inside the private container;
    remove any old host-side path overrides from Dokploy.
 3. In Dokploy's private API container terminal, check that the runtime can load

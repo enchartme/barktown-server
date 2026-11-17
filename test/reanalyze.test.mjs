@@ -6,12 +6,37 @@ import path from "path";
 
 import { buildConfig } from "../lib/config.mjs";
 import { runReanalyzeScript } from "../lib/reanalyze.mjs";
+import { workersForReanalysis } from "../lib/reanalysis-limiter.mjs";
 
 
 test("default re-analysis ownership points to the sibling Goblin checkout", () => {
   const cfg = buildConfig();
   assert.match(cfg.reanalyze.scriptPath, /barktown-goblin\/tools\/analyze_wav\.py$/);
   assert.match(cfg.reanalyze.modelDir, /barktown-goblin\/models$/);
+});
+
+test("an existing four-slot budget does not make interactive re-analysis use four workers", (t) => {
+  const keys = ["REANALYZE_CONCURRENCY", "REANALYZE_WORKERS_PER_JOB"];
+  const original = keys.map(key => process.env[key]);
+  t.after(() => keys.forEach((key, i) => {
+    if (original[i] === undefined) delete process.env[key];
+    else process.env[key] = original[i];
+  }));
+  keys.forEach(key => { delete process.env[key]; });
+  assert.equal(buildConfig().reanalyze.concurrency, 1);
+
+  process.env.REANALYZE_CONCURRENCY = "4";
+  let config = buildConfig().reanalyze;
+  assert.equal(config.concurrency, 4);
+  assert.equal(workersForReanalysis(config), 1);
+
+  process.env.REANALYZE_WORKERS_PER_JOB = "8";
+  config = buildConfig().reanalyze;
+  assert.equal(workersForReanalysis(config), 4);
+  assert.equal(workersForReanalysis(config, { bulk: true }), 1);
+
+  process.env.REANALYZE_WORKERS_PER_JOB = "invalid";
+  assert.equal(workersForReanalysis(buildConfig().reanalyze), 1);
 });
 
 test("runReanalyzeScript passes one effective monitor settings snapshot", async () => {
