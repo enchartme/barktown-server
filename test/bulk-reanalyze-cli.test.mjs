@@ -45,7 +45,7 @@ test("bulk CLI filters the requested day and serializes recordings despite legac
   const { stdout } = await execute(process.execPath, ["bulk-reanalyze.mjs", "2026-11-12"], {
     cwd: new URL("..", import.meta.url),
     env: { ...process.env, BULK_REANALYZE_PUBLIC_API_URL: base, BULK_REANALYZE_PRIVATE_API_URL: base,
-      REANALYZE_CONCURRENCY: "8", BULK_REANALYZE_CONCURRENCY: "1" },
+      REANALYZE_CONCURRENCY: "8", BULK_REANALYZE_CONCURRENCY: "4" },
   });
   assert.equal(peakActive, 1);
   assert.deepEqual(selected, ["/api/diary/a/reanalyze", "/api/diary/b/reanalyze"]);

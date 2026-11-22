@@ -45,6 +45,7 @@ import {
   existingDiarySampleConflict,
   sourceWavKeyCandidatesForEntry,
 } from "./lib/diary-samples.mjs";
+import { createReanalysisJobs, ReanalysisBusyError } from "./lib/reanalysis-jobs.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
 import { validateMultilabelScores } from "./lib/hit-metadata.mjs";
 import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
@@ -84,6 +85,8 @@ const mc = createClient(CFG.minio);
 const reanalysisLimiter = isPublicApi
   ? null
   : createReanalysisLimiter({ concurrency: CFG.reanalyze.concurrency });
+
+const reanalysisJobs = createReanalysisJobs();
 
 const app = Fastify({ logger: false });
 const corsMethods = isPublicApi
@@ -582,7 +585,7 @@ function annotationsByDiaryId(rows) {
 }
 
 /** List current WAV keys using two prefix scans rather than one stat per row. */
-async function listAvailableSourceWavKeys() {
+async function listAvailableSourceWavKeys({ strict = false } = {}) {
   const prefixes = [CFG.archivePrefix, CFG.samplesPrefix];
   const results = await Promise.allSettled(
     prefixes.map(prefix => listObjects(mc, CFG.bucket, prefix)),
@@ -594,6 +597,7 @@ async function listAvailableSourceWavKeys() {
         if (/\.wav$/i.test(object.name)) available.add(object.name);
       }
     } else {
+      if (strict) throw result.reason;
       warn(`could not list re-analysis sources below ${prefixes[index]}: ${result.reason?.message ?? result.reason}`);
     }
   });
@@ -1011,7 +1015,7 @@ privateApi.patch("/api/monitor-params/:paramId", async (req, reply) => {
 // values barktown-goblin's live monitor uses); optional body fields override
 // them for this one run: candidateThreshold, hitRefractoryS,
 // inferenceWindowS, scoreIntervalS — all range-validated finite numbers.
-privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
+async function reanalyzeDiary(req, reply) {
   const entry = getDiaryEntry(db, req.params.id);
   if (!entry) {
     reply.code(404);
@@ -1023,7 +1027,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
     reply.code(400);
     return { error: tuningError };
   }
-  const tuning = resolveReanalyzeTuning(req.body);
+  const tuning = req.reanalysisTuning ?? resolveReanalyzeTuning(req.body);
   const workers = reanalyzeWorkersForRequest(req);
 
   try {
@@ -1098,6 +1102,52 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
       return { error: e.message };
     }
     throw e;
+  }
+}
+
+// Progress and mutations are served exclusively by the Tailnet API.
+privateApi.get("/api/reanalysis", async (_req, reply) => {
+  reply.header("Cache-Control", "no-store");
+  return reanalysisJobs.snapshot();
+});
+
+async function exclusiveReanalysis(recordId, operation, reply) {
+  try { return await reanalysisJobs.run(recordId, operation); }
+  catch (error) {
+    if (!(error instanceof ReanalysisBusyError)) throw error;
+    reply.code(409);
+    return { error: error.message };
+  }
+}
+
+privateApi.post("/api/diary/:id/reanalyze", (req, reply) =>
+  exclusiveReanalysis(req.params.id, () => reanalyzeDiary(req, reply), reply));
+
+privateApi.post("/api/diary/reanalyze-day", (req, reply) => {
+  const { date } = req.body ?? {};
+  if (!isIsoDate(date)) return reply.code(400).send({ error: "date must be a real YYYY-MM-DD date" });
+  const tuningError = validateReanalyzeTuning(req.body);
+  if (tuningError) return reply.code(400).send({ error: tuningError });
+  // Freeze defaults once for a consistent full-day run.
+  const tuning = resolveReanalyzeTuning(req.body);
+  try {
+    const status = reanalysisJobs.startDay(date, async () => {
+      const entries = listDiaryEntries(db, { startDate: date, endDate: date }).filter(e => e.kind === 'audio');
+      const keys = await listAvailableSourceWavKeys({ strict: true });
+      const available = entries.filter(e => availableSourceWavPath(e, CFG, keys) !== null);
+      return { entries: available, skipped: entries.length - available.length };
+    }, async (entry) => {
+      let statusCode = 200;
+      const result = await reanalyzeDiary({ params: { id: entry.id }, body: req.body,
+        headers: { [BULK_REANALYZE_MODE_HEADER]: 'bulk' }, reanalysisTuning: tuning },
+        { code(value) { statusCode = value; return this; } });
+      if (statusCode >= 400) throw new Error(result.error);
+      return result;
+    }, Math.max(1, Math.floor(CFG.reanalyze.concurrency / workersForReanalysis(CFG.reanalyze, { bulk: true }))));
+    return reply.code(202).send(status);
+  } catch (error) {
+    if (!(error instanceof ReanalysisBusyError)) throw error;
+    return reply.code(409).send({ error: error.message });
   }
 });
 
@@ -1379,7 +1429,7 @@ privateApi.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
 // Reclassify a training sample's WAV. Existing bark/review/yap fragments are
 // replaced atomically with exact review windows from the new analyzer result;
 // notes and fragments with every other label are preserved.
-privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
+async function reanalyzeSample(req, reply) {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -1462,7 +1512,10 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
     }
     throw e;
   }
-});
+}
+
+privateApi.post("/api/samples/:id/reanalyze", (req, reply) =>
+  exclusiveReanalysis(`sample:${req.params.id}`, () => reanalyzeSample(req, reply), reply));
 
 // ─── Training samples (read-only) ────────────────────────────────────────────
 

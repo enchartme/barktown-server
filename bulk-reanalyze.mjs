@@ -34,10 +34,16 @@ const privateApiBase = (
   ?? process.env.BULK_REANALYZE_API_URL
   ?? `http://127.0.0.1:${privatePort}`
 ).replace(/\/$/, "");
-const concurrency = Number.parseInt(process.env.BULK_REANALYZE_CONCURRENCY ?? "1", 10);
-if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+const requestedConcurrency = Number.parseInt(process.env.BULK_REANALYZE_CONCURRENCY ?? "1", 10);
+if (!Number.isSafeInteger(requestedConcurrency) || requestedConcurrency < 1) {
   console.error("BULK_REANALYZE_CONCURRENCY must be a positive integer.");
   process.exit(2);
+}
+
+// Independent HTTP requests cannot share a day job's reservation.
+const concurrency = 1;
+if (requestedConcurrency > 1) {
+  console.warn("Serializing CLI requests to respect the API re-analysis lock; use a day job for pooled scoring.");
 }
 
 async function readJsonResponse(res) {

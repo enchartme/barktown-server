@@ -207,6 +207,8 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `PATCH /api/monitor-params/:paramId` | Update one monitor parameter |
 | `POST /api/diary/:id/hit-metadata` | Upsert hit metadata produced automatically by Goblin |
 | `POST /api/diary/:id/data-quality` | Upsert Goblin's timeboxed capture-integrity and XRUN facts |
+| `GET /api/reanalysis` | Current/last re-analysis job, progress counts, errors and currently processing recording IDs (private only) |
+| `POST /api/diary/reanalyze-day` | Start a detached full-day job with `{ "date": "YYYY-MM-DD" }` and optional tuning overrides; returns `202` |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
 | `DELETE /api/diary/:id` | Delete a diary entry |
 | `POST /api/diary/:id/move-to-samples` | Publish a diary recording and waveform as a training sample |
@@ -310,12 +312,30 @@ overrides. It preserves notes and non-bark/review/yap fragments, removes every
 existing bark/review/yap fragment, then adds one model-sourced review fragment for
 each newly accepted classifier window.
 
-The API permits one re-analysis worker slot at a time by default. Additional
-records wait in FIFO order; another request for a record that is already queued
-or running returns `409`. Each operation uses a unique temporary directory, and
-analyzer stdout/stderr are capped as well as timed out.
+The private API accepts one re-analysis job at a time: a single diary recording,
+a training sample, or a full day. All competing re-analysis requests return `409`
+until that job finishes. Only day jobs schedule several recordings internally,
+within the configured worker-slot budget. Other API routes and ingestion remain
+available. Each operation uses a unique temporary directory, and analyzer
+stdout/stderr are capped as well as timed out.
 
 ### Bulk re-analysis by date
+
+On the Tailnet, use **Re-analyze day** in a report card header or diary day
+label. The browser starts `POST /api/diary/reanalyze-day` on the private API.
+The job snapshots that day's recordings, skips unavailable source WAVs, and
+freezes detector settings for the run. Uploads arriving later remain outside
+that snapshot. Each successful result is committed independently; failures
+are counted and the rest of the day continues.
+
+Connected clients poll `GET /api/reanalysis` once a second, disable all
+re-analysis controls during any job, and refresh completed results in place.
+The report replaces currently processing recordings' barcode lines with
+“Processing…”. Playback, reads, uploads and other edits stay available.
+Closing the initiating browser does not cancel the job. Job progress is kept
+in the private API process's memory; restarting it interrupts the job and
+clears progress, while already committed recording results remain saved.
+
 
 In Dokploy's **private-api container terminal**, run:
 
@@ -370,8 +390,9 @@ The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits wor
 `http://127.0.0.1:$PRIVATE_API_PORT` outside Docker. Compose sets the read
 URL to `https://barktown-api.enchart.me` because public/private API containers
 are isolated. Override `BULK_REANALYZE_PUBLIC_API_URL` for another public host.
-`BULK_REANALYZE_CONCURRENCY` controls concurrent recordings and defaults to 1;
-it is separate from the private API's worker-slot budget. With the HTTP
+`BULK_REANALYZE_CONCURRENCY` is accepted for compatibility, but CLI requests
+are serialized to respect the API job lock. Use the UI day job to schedule
+recordings within the private API worker-slot budget. With the HTTP
 analyzer, each file uses the server's configured per-job worker count. Local
 subprocess bulk mode retains one worker per file.
 
