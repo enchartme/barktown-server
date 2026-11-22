@@ -64,3 +64,22 @@ test("HTTP analyzer rejects invalid or excessive response bodies", async t => {
   f.cfg.reanalyze.maxStdoutBytes = 32;
   await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }), /exceeded 32 bytes/);
 });
+
+
+test("HTTP analyzer socket failures expose the underlying cause", async t => {
+  const f = await fixture(t, req => req.socket.destroy());
+  await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }),
+    /Analyzer request failed: (UND_ERR_SOCKET|ECONNRESET)/);
+});
+
+test("HTTP analyzer preserves aggregate connection errors", async t => {
+  const f = await fixture(t, () => {});
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new TypeError("fetch failed", { cause: new AggregateError([
+      Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }),
+      Object.assign(new Error("network unreachable"), { code: "ENETUNREACH" }),
+    ]) });
+  });
+  await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }),
+    /ECONNREFUSED: connect refused; ENETUNREACH: network unreachable/);
+});

@@ -92,7 +92,9 @@ One-time setup (both applications must run on the same Dokploy host):
    settings. Remove obsolete `BARKTOWN_GOBLIN_DIR`, `REANALYZE_PYTHON_BIN`,
    `REANALYZE_SCRIPT_PATH` and `REANALYZE_MODEL_DIR` settings if present.
    The Compose defaults already set `REANALYZE_URL=http://barktown-analyzer:8080`
-   and `REANALYZE_TIMEOUT_MS=330000`. Keep concurrency and workers per job at 1.
+   and `REANALYZE_TIMEOUT_MS=330000`. For one three-worker job, set `REANALYZE_CONCURRENCY=3` and
+   `REANALYZE_WORKERS_PER_JOB=3`. The analyzer defaults to a three-worker cap;
+   raise `ANALYZER_MAX_WORKERS` in its Environment if needed.
 5. **Deploy Barktown-server once.** Its private API joins the existing analyzer
    network; public API and ingest do not. Compose retains the healthy private-API
    dependency so database migration runs before public startup. No recording
@@ -112,7 +114,9 @@ internal `POST /analyze` takes a raw `audio/wav` body with Content-Length,
 `X-Barktown-Monitor-Settings` JSON and `X-Barktown-Workers`. It returns the same
 hit-metadata JSON as the CLI, including per-hit `multilabel_scores`. Requests
 have upload/output bounds and a scoring timeout; one job runs at a time by
-default while health remains responsive. Busy/unavailable/failed analyzers
+default while health remains responsive. The analyzer defaults to at most three
+workers per job and caps larger requests rather than rejecting them. Requested
+and applied worker counts are recorded in `analysis_settings.execution`. Busy/unavailable/failed analyzers
 produce a reanalysis error, and the server does not replace stored results.
 
 The server Docker image no longer includes Python/LiteRT or analyzer assets.
