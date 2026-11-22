@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import {
   getDiaryEntry,
   getHitMetadata,
+  listHitMetadataPage,
   openDb,
   openReadonlyDb,
   saveReanalysisResult,
@@ -39,11 +40,15 @@ test("openDb migrates legacy hit_metadata rows to provenance columns", () => {
   const db = openDb(dbPath);
   try {
     const columns = new Set(db.prepare("PRAGMA table_info(hit_metadata)").all().map(row => row.name));
+    assert.ok(columns.has("multilabel_scores"));
+    assert.equal(db.prepare("SELECT multilabel_scores FROM hit_metadata").get().multilabel_scores, null);
+    openDb(dbPath).close();
     assert.ok(columns.has("model_trained_at"));
     assert.ok(columns.has("analysis_settings"));
     assert.ok(columns.has("analysis_trigger"));
 
     const migrated = getHitMetadata(db, "legacy-clip");
+    assert.equal(migrated.multilabelScores, null);
     assert.equal(migrated.modelTrainedAt, null);
     assert.deepEqual(migrated.analysisSettings, {});
     assert.equal(migrated.analysisTrigger, "automatic");
@@ -112,6 +117,7 @@ test("successful re-analysis replaces metadata and trim while clearing approval 
 
     const saved = saveReanalysisResult(db, id, {
       timestamps: [2, 7],
+      multilabelScores: [{ bark: .8, wildlife: .7 }, { yap: .9, wrongdog: .2 }],
       confidences: [0.93, 0.98],
       loudnesses: [1.4, 2.1],
       paddingS: 0,
@@ -123,11 +129,46 @@ test("successful re-analysis replaces metadata and trim while clearing approval 
 
     assert.equal(saved.approved, null);
     assert.deepEqual(saved.timestamps, [2, 7]);
+    assert.deepEqual(saved.multilabelScores, [{ bark: .8, wildlife: .7 }, { yap: .9, wrongdog: .2 }]);
     assert.equal(saved.trimStartMs, 500);
     assert.equal(saved.trimStopMs, 8500);
     assert.equal(getDiaryEntry(db, id).approved, null);
   } finally {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
+test("hit diagnostics round trip through single and paginated reads and clear on legacy replacement", () => {
+  const db = openDb(":memory:");
+  try {
+    const vectors = [{ bark: .98, yap: .12, wildlife: .9 }, { bark: .4, wind: .7 }];
+    const base = { timestamps: [1.5, 5.5], confidences: [.99, .96], loudnesses: [1.2, 1.4] };
+    upsertHitMetadata(db, "richer-clip", { ...base, multilabelScores: vectors });
+    assert.deepEqual(getHitMetadata(db, "richer-clip").multilabelScores, vectors);
+    assert.deepEqual(listHitMetadataPage(db).items[0].multilabelScores, vectors);
+    assert.equal(db.prepare("SELECT multilabel_scores FROM hit_metadata").get().multilabel_scores, JSON.stringify(vectors));
+    upsertHitMetadata(db, "richer-clip", { timestamps: [3], confidences: [.8], loudnesses: [1] });
+    assert.equal(getHitMetadata(db, "richer-clip").multilabelScores, null);
+    assert.equal(db.prepare("SELECT multilabel_scores FROM hit_metadata").get().multilabel_scores, null);
+    upsertHitMetadata(db, "richer-clip", { timestamps: [], confidences: [], loudnesses: [], multilabelScores: [] });
+    assert.deepEqual(getHitMetadata(db, "richer-clip").multilabelScores, []);
+  } finally {
+    db.close();
+  }
+});
+
+test("invalid diagnostics cannot overwrite existing hit metadata", () => {
+  const db = openDb(":memory:");
+  try {
+    const original = { timestamps: [1], confidences: [.9], loudnesses: [1], multilabelScores: [{ bark: .8 }] };
+    upsertHitMetadata(db, "safe-clip", original);
+    for (const multilabelScores of [[], [null], [{ bark: NaN }], [{ bark: Infinity }], [{ bark: -1 }], [{ bark: 1.01 }], [{ bark: "0.9" }], [{ b: .9 }], [{}]]) {
+      assert.throws(() => upsertHitMetadata(db, "safe-clip", { ...original, multilabelScores }), /multilabel_scores/);
+      assert.deepEqual(getHitMetadata(db, "safe-clip").multilabelScores, original.multilabelScores);
+    }
+  } finally {
+    db.close();
   }
 });

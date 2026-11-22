@@ -47,7 +47,7 @@ test("runReanalyzeScript passes one effective monitor settings snapshot", async 
     const value = (name) => args[args.indexOf(name) + 1];
     const monitor = JSON.parse(value("--monitor-settings-json"));
     console.log(JSON.stringify({
-      timestamps: [], confidences: [], loudnesses: [], padding_s: 0, window_s: 1.5,
+      timestamps: [1.5], confidences: [.99], loudnesses: [1], multilabel_scores: [{ bark: .6, wildlife: .98 }], padding_s: 0, window_s: 1.5,
       model_trained_at: "2026-08-12T13:32:07Z",
       analysis_settings: { classifier: { threshold: 0.42 }, monitor },
       analysis_trigger: "manual",
@@ -78,6 +78,7 @@ test("runReanalyzeScript passes one effective monitor settings snapshot", async 
     assert.equal(payload.workers, 3);
     assert.deepEqual(payload.analysis_settings.monitor, monitorSettings);
     assert.equal(payload.analysis_trigger, "manual");
+    assert.deepEqual(payload.multilabel_scores, [{ bark: .6, wildlife: .98 }]);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

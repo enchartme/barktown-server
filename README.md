@@ -235,6 +235,52 @@ settings actually applied during that run. Existing records
 migrate with an unknown model timestamp, empty settings, and an `automatic`
 trigger.
 
+Hit metadata also supports optional per-hit multilabel diagnostics. Classifier
+submissions to `POST /api/diary/:id/hit-metadata` and offline analyzer output
+use `multilabel_scores`. Both `GET /api/diary/:id/hit-metadata` and the `items`
+in `GET /api/hit-metadata` return the field as `multilabelScores`, following
+the existing camel-case response convention. The POST response uses the same
+shape. For example, a classifier may submit:
+
+```json
+{
+  "timestamps": [1.5, 5.5],
+  "confidences": [0.99, 0.97],
+  "loudnesses": [1.2, 1.4],
+  "multilabel_scores": [
+    {"bark": 0.45, "yap": 0.4, "wildlife": 0.98},
+    {"bark": 0.6, "wrongdog": 0.8, "wind": 0.2}
+  ]
+}
+```
+
+When supplied, the array must match `timestamps` in length. Every entry must
+be a nonempty JSON object with canonical sample label names (`bark`, `yap`,
+`background`, `wind`, `homestead`, `traffic`, `wildlife`, `gunshot`, `wrongdog`)
+and finite numeric scores in [0, 1]. A subset of labels is accepted; a missing
+label means unavailable, not zero. Shortcuts and workflow-only labels are not
+accepted. Scores are independent and need not sum to one. Binary confidences
+are stored unchanged; the server does not derive decisions or apply vetoes.
+The classifier must align each diagnostic object with the same binary hit and
+underlying inference patch. Existing `analysis_settings` preserves both head
+identities and scoring settings.
+
+The nullable SQLite `hit_metadata.multilabel_scores` TEXT column stores JSON.
+Existing databases migrate automatically when a writable process calls
+`openDb()`; old rows remain SQL NULL and read as `multilabelScores: null`.
+Omitted or explicit-null diagnostics are accepted from older classifiers.
+A zero-hit result may supply `[]`; null means diagnostics are unavailable.
+Every upsert replaces the whole result: a new binary-only result clears any
+previous diagnostic array, preventing stale score/timestamp alignment. Manual
+reanalysis passes the optional array through the same validation and atomic
+metadata/trim/approval update. No full-window scores are stored.
+
+On deployment, start/restart a writable process (ingest or private API) before
+restarting the public API, so the shared database is migrated first. The public
+API remains read-only and does not perform schema migrations. This change
+prepares the receive/read contract; classifier emission, UI rendering, model
+deployment, and historical scoring are subsequent work.
+
 Diary responses include a live `reanalyzable` boolean. It is true only when a
 source WAV currently exists in MinIO: either the diary entry's archived WAV or
 a WAV belonging to its linked training sample. New WAV ingests retain the

@@ -812,3 +812,59 @@ test("DELETE /api/annotations/:id removes it", async () => {
   const rows = await check.json();
   assert.ok(!rows.some((r) => r.id === annotationId));
 });
+
+
+test("richer classifier hits are returned by POST, single GET and bulk GET without changing binary confidence", async () => {
+  const id = "multilabel-roundtrip";
+  const multilabelScores = [{ bark: .45, yap: .4, wildlife: .98 }, { wrongdog: .8, bark: .6 }];
+  const payload = { timestamps: [1.5, 5.5], confidences: [.99, .97], loudnesses: [1, 2], multilabel_scores: multilabelScores,
+    analysis_settings: { classifier: { model_sha256: "a".repeat(64), target_model: { sha256: "b".repeat(64) } } } };
+  const response = await fetch(`${privateServer.baseUrl}/api/diary/${id}/hit-metadata`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  assert.equal(response.status, 201);
+  const created = await response.json();
+  assert.deepEqual(created.multilabelScores, multilabelScores);
+  assert.deepEqual(created.confidences, payload.confidences);
+  assert.deepEqual(created.analysisSettings, payload.analysis_settings);
+  const single = await (await fetch(`${publicServer.baseUrl}/api/diary/${id}/hit-metadata`)).json();
+  assert.deepEqual(single.multilabelScores, multilabelScores);
+  const page = await (await fetch(`${publicServer.baseUrl}/api/hit-metadata?pageSize=1000`)).json();
+  assert.deepEqual(page.items.find(item => item.clipId === id).multilabelScores, multilabelScores);
+
+  // A binary-only replacement must not retain diagnostics for the old hit set.
+  const legacy = await fetch(`${privateServer.baseUrl}/api/diary/${id}/hit-metadata`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ timestamps: [2], confidences: [.8], loudnesses: [1] }),
+  });
+  assert.equal(legacy.status, 201);
+  assert.equal((await legacy.json()).multilabelScores, null);
+});
+
+test("hit metadata accepts explicit null and zero-hit diagnostic arrays", async () => {
+  for (const multilabel_scores of [null, []]) {
+    const response = await fetch(`${privateServer.baseUrl}/api/diary/multilabel-empty/hit-metadata`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timestamps: [], confidences: [], loudnesses: [], multilabel_scores }),
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual((await response.json()).multilabelScores, multilabel_scores);
+  }
+});
+
+test("hit metadata rejects malformed diagnostics without replacing the saved result", async () => {
+  const id = "multilabel-validation";
+  const payload = { timestamps: [1], confidences: [.9], loudnesses: [1], multilabel_scores: [{ bark: .8 }] };
+  const post = (body) => fetch(`${privateServer.baseUrl}/api/diary/${id}/hit-metadata`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  assert.equal((await post(payload)).status, 201);
+  for (const value of [{ bark: .9 }, [], [{ bark: .8 }, { bark: .7 }], [null], [[]], [true], [{}], [{ b: .9 }], [{ review: .8 }], [{ bark_or_yap: .8 }], [{ bark: "0.8" }], [{ bark: true }], [{ bark: -0.1 }], [{ bark: 1.1 }], [{ bark: null }]]) {
+    const response = await post({ ...payload, multilabel_scores: value });
+    assert.equal(response.status, 400, JSON.stringify(value));
+    assert.match((await response.json()).error, /multilabel_scores/);
+  }
+  const saved = await (await fetch(`${publicServer.baseUrl}/api/diary/${id}/hit-metadata`)).json();
+  assert.deepEqual(saved.multilabelScores, payload.multilabel_scores);
+  assert.deepEqual(saved.timestamps, payload.timestamps);
+});

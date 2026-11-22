@@ -46,6 +46,7 @@ import {
   sourceWavKeyCandidatesForEntry,
 } from "./lib/diary-samples.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
+import { validateMultilabelScores } from "./lib/hit-metadata.mjs";
 import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
 import {
   createReanalysisLimiter,
@@ -229,6 +230,7 @@ function validateHitMetadataPayload(payload, { requireProvenance = false, requir
     model_trained_at: modelTrainedAt,
     analysis_settings: analysisSettings,
     analysis_trigger: analysisTrigger,
+    multilabel_scores: multilabelScores,
   } = payload ?? {};
   if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
     return "timestamps, confidences and loudnesses must be arrays";
@@ -237,6 +239,8 @@ function validateHitMetadataPayload(payload, { requireProvenance = false, requir
   if (confidences.length !== n || loudnesses.length !== n) {
     return "timestamps, confidences and loudnesses must have the same length";
   }
+  const multilabelError = validateMultilabelScores(multilabelScores, n);
+  if (multilabelError) return multilabelError;
   if (!timestamps.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
     return "timestamps must be non-negative finite numbers";
   }
@@ -911,6 +915,7 @@ privateApi.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     model_trained_at: modelTrainedAt,
     analysis_settings: analysisSettings,
     analysis_trigger: analysisTrigger,
+    multilabel_scores: multilabelScores,
   } = payload;
 
   const error = validateHitMetadataPayload(payload);
@@ -932,6 +937,7 @@ privateApi.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     modelTrainedAt: modelTrainedAt ?? null,
     analysisSettings: analysisSettings ?? {},
     analysisTrigger: analysisTrigger ?? "automatic",
+    multilabelScores: multilabelScores ?? null,
   });
   reply.code(201);
   return getHitMetadata(db, clipId);
@@ -1066,6 +1072,7 @@ privateApi.post("/api/diary/:id/reanalyze", async (req, reply) => {
           timestamps: payload.timestamps,
           confidences: payload.confidences,
           loudnesses: payload.loudnesses,
+          multilabelScores: payload.multilabel_scores ?? null,
           paddingS: typeof payload.padding_s === "number" ? payload.padding_s : 0,
           windowS: typeof payload.window_s === "number" && payload.window_s > 0 ? payload.window_s : 1.5,
           modelTrainedAt: payload.model_trained_at ?? null,
