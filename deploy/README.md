@@ -126,6 +126,13 @@ existing sibling-checkout subprocess configuration. The legacy
 
 ## Redeploy, backup and rollback
 
+The private API mounts `BARKTOWN_BACKUP_DIR` (default
+`/srv/verbatim/barktown/backups`) at `/backups`, and sets `BACKUP_ROOT=/backups`.
+The host directory must already exist and be writable by `BARKTOWN_UID` and
+`BARKTOWN_GID`; Compose will not create a root-owned directory implicitly.
+In the private API container terminal, `cd /app` then `npm run dump-db` saves
+persistent DB/SQL/JSON exports there, separate from `/data`.
+
 - For routine updates: keep the same Dokploy service, data path, bucket and credentials. Snapshot SQLite before deploying schema changes. Select the reviewed branch/revision and click **Deploy**, then repeat the health and ingest checks. A redeploy does not copy or reset the database.
 - Make a normal file backup with `bash deploy/database.sh snapshot /srv/verbatim/barktown/data/barktown.db /srv/verbatim/barktown/backups/barktown-YYYYMMDD-HHMMSS.db`, using a new destination name. Copy it off the Pi along with separately backed-up MinIO objects and the deployment secrets/settings stored securely. Test restore into a fresh directory. For identical application/storage state, use a coordinated SQLite and MinIO recovery point.
 - To restore on the same host, stop all three containers, restore into a **new** directory, update `BARKTOWN_DATA_DIR`, and deploy. Never replace an active database or copy only the main file from a live SQLite directory.

@@ -58,11 +58,19 @@ services:
   private-api:
     <<: *runtime
     command: ["node", "server-private.mjs"]
+    volumes:
+      - *database-mount
+      - type: bind
+        source: ${BARKTOWN_BACKUP_DIR:-/srv/verbatim/barktown/backups}
+        target: /backups
+        bind:
+          create_host_path: false
     env_file: .env
     environment:
       <<: *storage-env
       PRIVATE_API_HOST: 0.0.0.0
       PRIVATE_API_PORT: "8090"
+      BACKUP_ROOT: /backups
       REANALYZE_URL: ${REANALYZE_URL:-http://barktown-analyzer:8080}
       REANALYZE_TIMEOUT_MS: ${REANALYZE_TIMEOUT_MS:-330000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}
