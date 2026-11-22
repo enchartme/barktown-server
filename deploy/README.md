@@ -60,38 +60,65 @@ The old Pi hostname on HTTPS port 443 is not a Barktown endpoint. If the
 temporary `barktown-private-redirect.yml` remains in Dokploy's Traefik dynamic
 directory, move it out after updating the clients to the named Service.
 
-### Re-analyze
+### Re-analyze: independently deployed Goblin service
 
-The image includes Python, NumPy and LiteRT. It doesn't need the host Python
-virtualenv, and Dokploy doesn't need access to the Goblin repository to build
-Barktown. Supply the analyzer and its model assets as a read-only mount.
+Routine analyzer deployment is **push Goblin main → Dokploy Auto Deploy**.
+The analyzer image contains Python, LiteRT, the analyzer code and the committed
+`models/analyzer/` classifier bundle. Its Docker build downloads/caches YAMNet
+and checks both model loading and an inference before producing the image.
+Barktown-server streams a WAV and the effective monitor settings over an
+internal Docker network, then validates/persists the returned hit metadata.
+There are no host asset directories, version settings, manual packages or
+Python/model mounts to update.
 
-1. Run as the Barktown data owner from this server checkout:
-   `bash deploy/prepare-goblin-assets.sh /home/pi/git/enchartme/barktown-goblin`.
-   The command copies analyzer code at the checkout's Git commit and packages
-   the active model files, recording their checksums. By default it reads the
-   Goblin checkout's `models/`; pass a second path if your models are stored
-   elsewhere. A restored or new host needs the deployed classifier and its
-   matching metadata, plus the embeddings variant of YAMNet (see the Goblin
-   repo's `tools/download_models.py`). Keep a backup of the asset bundle.
-2. Paste the printed `BARKTOWN_GOBLIN_DIR=...` line into the production Compose
-   Environment. Set `REANALYZE_CONCURRENCY=1` and
-   `REANALYZE_WORKERS_PER_JOB=1` on the Pi, then deploy. Each worker loads
-   a separate pair of models. The private API logs both effective limits at startup.
-   Compose sets the Python, script and model paths inside the private container;
-   remove any old host-side path overrides from Dokploy.
-3. In Dokploy's private API container terminal, check that the runtime can load
-   both models before trying a real recording:
+One-time setup (both applications must run on the same Dokploy host):
 
-   ```bash
-   cd /opt/barktown-goblin
-   /opt/barktown-reanalysis/bin/python -B -c 'from bark.classifier import BarkClassifier; BarkClassifier(model_dir="models", num_threads=1); print("Barktown models loaded")'
-   ```
+1. Commit/push the Goblin service changes and all three files under
+   `models/analyzer/` (label model, binary target model and metadata). The root
+   `models/` files used by the recording device are independent.
+2. In Dokploy's existing **Barktown** project/environment, create a new
+   **Docker Compose** application named **Goblin analyzer**. Grant Dokploy's
+   GitHub App access to `enchartme/barktown-goblin` if it is not already listed.
+   Choose that repository, branch **main**, Compose path
+   **compose.analyzer.yaml**, and Docker Compose mode (not Stack). Enable
+   **Auto Deploy**. No environment variables, domain, host port, database or
+   storage mount are required for the analyzer.
+3. Click **Deploy** on Goblin first. Its Compose file creates the bridge network
+   `barktown-reanalysis`, with stable DNS alias `barktown-analyzer`. Wait for
+   the analyzer to become healthy; checks happen automatically. Build logs show
+   model-loading failures. The analyzer has no published port.
+4. Commit/push this server's HTTP transport/Compose changes. On the existing
+   Barktown-server Dokploy application, keep its current database and MinIO
+   settings. Remove obsolete `BARKTOWN_GOBLIN_DIR`, `REANALYZE_PYTHON_BIN`,
+   `REANALYZE_SCRIPT_PATH` and `REANALYZE_MODEL_DIR` settings if present.
+   The Compose defaults already set `REANALYZE_URL=http://barktown-analyzer:8080`
+   and `REANALYZE_TIMEOUT_MS=330000`. Keep concurrency and workers per job at 1.
+5. **Deploy Barktown-server once.** Its private API joins the existing analyzer
+   network; public API and ingest do not. Compose retains the healthy private-API
+   dependency so database migration runs before public startup. No recording
+   device deployment is needed. Reanalyze one historical recording in the
+   existing UI. Its response/public hit-metadata GET contains the aligned
+   `multilabelScores`; visual display is separate UI work.
 
-4. Re-analyze one known recording with a source WAV in the private UI. This
-   updates its stored hit metadata. Leave `BARKTOWN_GOBLIN_DIR` unset on
-   deployments that don't need re-analysis; the other functions still work.
-   To roll back a model update, set it back to the previous bundle and redeploy.
+After setup, push Goblin main to publish code or committed classifier changes.
+Dokploy checks out main, rebuilds and replaces only the Goblin analyzer service.
+No server redeployment or environment edits are needed for those updates.
+When publishing new trained models, commit their matching weights/metadata
+files together in Goblin's `models/analyzer/`; deployment never retrains models.
+The initial bundle is the parallel binary + nine-label experiment, with no veto.
+
+The analyzer's `GET /health` reports readiness and model provenance. The
+internal `POST /analyze` takes a raw `audio/wav` body with Content-Length,
+`X-Barktown-Monitor-Settings` JSON and `X-Barktown-Workers`. It returns the same
+hit-metadata JSON as the CLI, including per-hit `multilabel_scores`. Requests
+have upload/output bounds and a scoring timeout; one job runs at a time by
+default while health remains responsive. Busy/unavailable/failed analyzers
+produce a reanalysis error, and the server does not replace stored results.
+
+The server Docker image no longer includes Python/LiteRT or analyzer assets.
+Local non-container development can still omit `REANALYZE_URL` to use the
+existing sibling-checkout subprocess configuration. The legacy
+`prepare-goblin-assets.sh` is not used by this Dokploy deployment.
 
 ## Redeploy, backup and rollback
 

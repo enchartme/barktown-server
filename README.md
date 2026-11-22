@@ -278,8 +278,8 @@ metadata/trim/approval update. No full-window scores are stored.
 On deployment, start/restart a writable process (ingest or private API) before
 restarting the public API, so the shared database is migrated first. The public
 API remains read-only and does not perform schema migrations. This change
-prepares the receive/read contract; classifier emission, UI rendering, model
-deployment, and historical scoring are subsequent work.
+supports the receive/read contract; the independently deployed Goblin analyzer
+emits these scores. Waveform UI rendering remains separate work.
 
 Diary responses include a live `reanalyzable` boolean. It is true only when a
 source WAV currently exists in MinIO: either the diary entry's archived WAV or
@@ -295,6 +295,10 @@ complete archived source, then sets the visible range from 1.5 seconds before
 the first newly identified bark to 1.5 seconds after the last. The range is
 clamped to the source duration; a result with no barks remains untrimmed.
 
+Docker deployments call the independent Goblin analyzer over its private HTTP
+endpoint. See [the one-time Dokploy setup](deploy/README.md#re-analyze-independently-deployed-goblin-service).
+Goblin main auto-deploys independently after setup.
+
 Manual re-analysis is deterministic window reclassification, not replay of
 Goblin's callback-aligned live event state machine. It applies and records only
 `candidate_threshold`, `hit_refractory_s`, `inference_window_s`, and
@@ -306,7 +310,7 @@ overrides. It preserves notes and non-bark/review/yap fragments, removes every
 existing bark/review/yap fragment, then adds one model-sourced review fragment for
 each newly accepted classifier window.
 
-The API permits four re-analysis operations at a time by default. Additional
+The API permits one re-analysis worker slot at a time by default. Additional
 records wait in FIFO order; another request for a record that is already queued
 or running returns `409`. Each operation uses a unique temporary directory, and
 analyzer stdout/stderr are capped as well as timed out.
@@ -359,9 +363,11 @@ training re-analysis and never exceeds the shared budget. Bulk requests use
 one worker per file. Each worker loads its own model pair; keep both settings
 at `1` on the Pi unless parallel runs have been tested.
 
-For the server-side Python environment, TFLite runtime, model bundle, systemd
-wiring, and smoke-test procedure, follow Goblin's
-[Setup as barktown-api analyzer](https://github.com/enchartme/barktown-goblin#setup-as-barktown-api-analyzer).
+For the standalone analyzer image and one-time Dokploy setup, see
+[the deployment guide](deploy/README.md#re-analyze-independently-deployed-goblin-service).
+Python and models now belong to the Goblin service; the server image only
+streams WAVs and receives results. The local subprocess remains available
+outside Docker when `REANALYZE_URL` is omitted.
 
 `training-samples-index.json` in MinIO is regenerated after each mutation on
 a best-effort basis (the database is the source of truth, and
@@ -373,11 +379,12 @@ a best-effort basis (the database is the source of truth, and
 | `PUBLIC_API_PORT` | `8091` | Public API port; point `barktown-api.enchart.me` here through cloudflared |
 | `PRIVATE_API_HOST` | legacy `API_HOST`, then `127.0.0.1` | Private API bind interface |
 | `PRIVATE_API_PORT` | legacy `API_PORT`, then `8090` | Private API port; expose only through Tailscale |
-| `REANALYZE_PYTHON_BIN` | `python3` | Python environment containing Goblin's inference dependencies |
-| `REANALYZE_SCRIPT_PATH` | sibling `barktown-goblin/tools/analyze_wav.py` | Goblin offline analyzer |
+| `REANALYZE_URL` | Compose: `http://barktown-analyzer:8080`; otherwise unset | Independent analyzer service; unset selects the legacy local subprocess |
+| `REANALYZE_PYTHON_BIN` | `python3` | Local-subprocess mode only: Python environment containing inference dependencies |
+| `REANALYZE_SCRIPT_PATH` | sibling `barktown-goblin/tools/analyze_wav.py` | Local-subprocess mode only: Goblin offline analyzer |
 | `REANALYZE_MODEL_DIR` | sibling `barktown-goblin/models` | Directory containing YAMNet and the classifier metadata pair |
-| `REANALYZE_TIMEOUT_MS` | `300000` | Maximum time for one synchronous re-analysis request |
-| `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Kill an analyzer whose JSON/stdout exceeds this size |
+| `REANALYZE_TIMEOUT_MS` | Compose: `330000`; local: `300000` | Maximum time for one synchronous re-analysis request |
+| `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Reject oversized HTTP results or local subprocess stdout |
 | `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
 | `REANALYZE_CONCURRENCY` | `1` | Total active worker slots across all requests |
 | `REANALYZE_WORKERS_PER_JOB` | `1` | Workers for one interactive request, capped by the total; bulk requests always use one |
