@@ -34,9 +34,9 @@ const privateApiBase = (
   ?? process.env.BULK_REANALYZE_API_URL
   ?? `http://127.0.0.1:${privatePort}`
 ).replace(/\/$/, "");
-const concurrency = Number.parseInt(process.env.REANALYZE_CONCURRENCY ?? "1", 10);
+const concurrency = Number.parseInt(process.env.BULK_REANALYZE_CONCURRENCY ?? "1", 10);
 if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
-  console.error("REANALYZE_CONCURRENCY must be a positive integer.");
+  console.error("BULK_REANALYZE_CONCURRENCY must be a positive integer.");
   process.exit(2);
 }
 
@@ -48,7 +48,7 @@ async function readJsonResponse(res) {
 
 let diary;
 try {
-  diary = await readJsonResponse(await fetch(`${publicApiBase}/api/diary`));
+  diary = await readJsonResponse(await fetch(`${publicApiBase}/api/diary?${new URLSearchParams({ startDate, endDate })}`));
 } catch (error) {
   console.error(`Could not load diary from ${publicApiBase}: ${error.message}`);
   process.exit(1);
@@ -68,7 +68,7 @@ console.log(`Bulk re-analysis: ${dateLabel}`);
 console.log(`Read API: ${publicApiBase}`);
 console.log(`Private API: ${privateApiBase}`);
 console.log(`Entries: ${selectedEntries.length}; eligible: ${eligible.length}; unavailable: ${skipped}`);
-console.log(`Workers: ${concurrency}`);
+console.log(`Concurrent recordings: ${concurrency}`);
 console.log(`Overrides: ${Object.keys(tuning).length ? JSON.stringify(tuning) : "none (using DB defaults)"}`);
 
 if (eligible.length === 0) {

@@ -115,3 +115,10 @@ test("runReanalyzeScript kills analyzers that exceed output limits", async () =>
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+
+test("HTTP bulk scoring uses configured per-job workers while local bulk remains single-worker", () => {
+  const config = { concurrency: 3, workersPerJob: 3 };
+  assert.equal(workersForReanalysis(config, { bulk: true }), 1);
+  assert.equal(workersForReanalysis({ ...config, url: "http://barktown-analyzer:8080" }, { bulk: true }), 3);
+});

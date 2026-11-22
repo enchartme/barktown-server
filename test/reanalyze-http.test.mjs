@@ -74,6 +74,12 @@ test("HTTP analyzer socket failures expose the underlying cause", async t => {
 
 test("HTTP analyzer preserves aggregate connection errors", async t => {
   const f = await fixture(t, () => {});
+  const createReadStream = fs.createReadStream;
+  let upload;
+  t.mock.method(fs, "createReadStream", (...args) => {
+    upload = createReadStream(...args);
+    return upload;
+  });
   t.mock.method(globalThis, "fetch", async () => {
     throw new TypeError("fetch failed", { cause: new AggregateError([
       Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }),
@@ -82,4 +88,5 @@ test("HTTP analyzer preserves aggregate connection errors", async t => {
   });
   await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }),
     /ECONNREFUSED: connect refused; ENETUNREACH: network unreachable/);
+  assert.equal(upload.closed, true, "upload must close before the caller can delete its WAV");
 });

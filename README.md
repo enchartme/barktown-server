@@ -317,6 +317,23 @@ analyzer stdout/stderr are capped as well as timed out.
 
 ### Bulk re-analysis by date
 
+In Dokploy's **private-api container terminal**, run:
+
+```bash
+cd /app
+npm run bulk-reanalyze -- 2026-11-12
+```
+
+Replace the date as needed. The container uses the public metadata API to
+select available recordings and its local private API to submit reanalysis.
+The batch processes one recording at a time, while the HTTP analyzer uses the
+configured per-record worker count (for example three). No threshold override
+is needed to add diagnostic scores at the current production threshold.
+Successful records have hit metadata/automatic trim replaced and approval
+cleared, just like the individual UI action. Missing source WAVs are skipped.
+Keep the terminal open until the final summary appears.
+
+
 Run the server-local CLI with one real calendar date, or an explicit inclusive
 date range. It loads the current diary, selects only matching entries whose
 source WAV is currently available, and submits them through a bounded worker
@@ -350,17 +367,20 @@ this CLI run. They are sent with every selected request and recorded in its
 hit-metadata provenance; the database defaults themselves are not changed.
 
 The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits work to
-`http://127.0.0.1:$PRIVATE_API_PORT`. It uses the same
-`REANALYZE_CONCURRENCY` CPU-slot budget as the private API. Set the two
-`BULK_REANALYZE_*_API_URL` variables only when either API is at another
-address. Changes to these limits take effect after the private API is restarted
-or redeployed.
+`http://127.0.0.1:$PRIVATE_API_PORT` outside Docker. Compose sets the read
+URL to `https://barktown-api.enchart.me` because public/private API containers
+are isolated. Override `BULK_REANALYZE_PUBLIC_API_URL` for another public host.
+`BULK_REANALYZE_CONCURRENCY` controls concurrent recordings and defaults to 1;
+it is separate from the private API's worker-slot budget. With the HTTP
+analyzer, each file uses the server's configured per-job worker count. Local
+subprocess bulk mode retains one worker per file.
 
 By default, re-analysis runs one worker at a time. `REANALYZE_CONCURRENCY`
 controls how many worker slots may be active across all requests.
 `REANALYZE_WORKERS_PER_JOB` limits the workers for one interactive diary or
 training re-analysis and never exceeds the shared budget. Bulk requests use
-one worker per file. Each worker loads its own model pair; keep both settings
+the configured per-job workers with the HTTP service (one worker in legacy
+local bulk mode). Each worker loads its own models; keep both settings
 at `1` on the Pi unless parallel runs have been tested.
 
 For the standalone analyzer image and one-time Dokploy setup, see
