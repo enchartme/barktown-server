@@ -159,7 +159,7 @@ test("CORS preflight allows PUT, PATCH and DELETE", async () => {
 });
 
 test("public API is non-cacheable and does not register mutation routes", async () => {
-  const read = await fetch(`${publicServer.baseUrl}/api/diary`);
+  const read = await fetch(`${publicServer.baseUrl}/api/samples`);
   assert.equal(read.status, 200);
   assert.equal(read.headers.get("cache-control"), "no-store");
 
@@ -179,30 +179,31 @@ test("GET /api/recording-context exposes public report metadata", async () => {
 });
 
 test("private API does not duplicate public data routes", async () => {
-  const res = await fetch(`${privateServer.baseUrl}/api/diary`);
+  const res = await fetch(`${privateServer.baseUrl}/api/samples/sample-001`);
   assert.equal(res.status, 404);
 });
 
-test("training reads are only registered on the private API", async () => {
+test("training reads are public again while the private API keeps mutations", async () => {
   for (const route of [
     "/api/samples", "/api/samples?label=bark", "/api/samples/sample-001",
     "/api/samples/sample-001/annotations", "/api/samples/sample-001/data-quality",
     "/api/annotations",
   ]) {
-    const publicResponse = await fetch(`${publicServer.baseUrl}${route}`);
-    assert.equal(publicResponse.status, 404, route);
-    assert.equal(publicResponse.headers.get("cache-control"), "no-store", route);
-    const privateResponse = await fetch(`${privateServer.baseUrl}${route}`);
-    // An existing sample without quality data legitimately returns 404.
-    assert.equal(privateResponse.status, route.endsWith("/data-quality") ? 404 : 200, route);
+    const response = await fetch(`${publicServer.baseUrl}${route}`);
+    assert.equal(response.headers.get("cache-control"), "no-store", route);
     if (route.endsWith("/data-quality")) {
-      assert.deepEqual(await privateResponse.json(), { error: "not found" });
+      // The handler exists, but this sample has no quality record.
+      assert.equal(response.status, 404, route);
+      assert.deepEqual(await response.json(), { error: "not found" });
+    } else {
+      assert.equal(response.status, 200, route);
     }
+    assert.equal((await fetch(`${privateServer.baseUrl}${route}`)).status, 404, route);
   }
 });
 
 test("GET /api/samples/:id returns the seeded sample", async () => {
-  const res = await fetch(`${privateServer.baseUrl}/api/samples/sample-001`);
+  const res = await fetch(`${publicServer.baseUrl}/api/samples/sample-001`);
   assert.equal(res.status, 200);
   const sample = await res.json();
   assert.equal(sample.id, "sample-001");
@@ -210,7 +211,7 @@ test("GET /api/samples/:id returns the seeded sample", async () => {
 });
 
 test("GET /api/samples/:id returns 404 for an unknown id", async () => {
-  const res = await fetch(`${privateServer.baseUrl}/api/samples/does-not-exist`);
+  const res = await fetch(`${publicServer.baseUrl}/api/samples/does-not-exist`);
   assert.equal(res.status, 404);
 });
 
@@ -678,7 +679,7 @@ test("POST /api/samples/:id/annotations rejects endSec < startSec", async () => 
 });
 
 test("GET /api/annotations aggregates across samples, joined with sample fields", async () => {
-  const res = await fetch(`${privateServer.baseUrl}/api/annotations`);
+  const res = await fetch(`${publicServer.baseUrl}/api/annotations`);
   assert.equal(res.status, 200);
   const rows = await res.json();
   const row = rows.find((r) => r.id === annotationId);
@@ -807,7 +808,7 @@ test("DELETE /api/annotations/:id removes it", async () => {
   const res = await fetch(`${privateServer.baseUrl}/api/annotations/${annotationId}`, { method: "DELETE" });
   assert.equal(res.status, 204);
 
-  const check = await fetch(`${privateServer.baseUrl}/api/annotations`);
+  const check = await fetch(`${publicServer.baseUrl}/api/annotations`);
   const rows = await check.json();
   assert.ok(!rows.some((r) => r.id === annotationId));
 });

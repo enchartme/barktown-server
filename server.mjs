@@ -1457,14 +1457,14 @@ privateApi.post("/api/samples/:id/reanalyze", async (req, reply) => {
   }
 });
 
-// ─── Training samples (Tailnet-only reads) ──────────────────────────────────
+// ─── Training samples (read-only) ────────────────────────────────────────────
 
-privateApi.get("/api/samples", async (req) => {
+publicApi.get("/api/samples", async (req) => {
   const label = typeof req.query.label === "string" ? req.query.label : undefined;
   return listSamples(db, { label });
 });
 
-privateApi.get("/api/samples/:id", async (req, reply) => {
+publicApi.get("/api/samples/:id", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -1473,7 +1473,7 @@ privateApi.get("/api/samples/:id", async (req, reply) => {
   return sample;
 });
 
-privateApi.get("/api/samples/:id/annotations", async (req, reply) => {
+publicApi.get("/api/samples/:id/annotations", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -1482,7 +1482,7 @@ privateApi.get("/api/samples/:id/annotations", async (req, reply) => {
   return listAnnotations(db, req.params.id);
 });
 
-privateApi.get("/api/samples/:id/data-quality", async (req, reply) => {
+publicApi.get("/api/samples/:id/data-quality", async (req, reply) => {
   const sample = getSample(db, req.params.id);
   if (!sample || sample.status !== "active") {
     reply.code(404);
@@ -1500,7 +1500,7 @@ privateApi.get("/api/samples/:id/data-quality", async (req, reply) => {
 // All annotations across all active samples, in one request — for laptop-side
 // training export tools (tools/export_fragments.py in barktown-goblin) that
 // need to sync the whole corpus without one request per sample.
-privateApi.get("/api/annotations", async () => {
+publicApi.get("/api/annotations", async () => {
   return listAllAnnotations(db);
 });
 
