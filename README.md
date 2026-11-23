@@ -631,6 +631,11 @@ to diary/report hit displays and bark counts, retaining each window only when
 all available label scores satisfy the inclusive ranges. Missing diagnostics
 pass through. Raw metadata, binary detection, recording durations, disturbance
 counts, and training annotations are unchanged. Other open browsers refresh
-settings when they regain focus; reset all ranges to 0–1 and save to restore
-all windows without reanalysis. The summary API itself remains unfiltered;
-the report subtracts hidden windows from its totals after metadata loads.
+settings when they regain focus. Slider changes save on release (including
+keyboard adjustments); Reset ranges immediately restores 0–1 for every label
+and saves, restoring all windows without reanalysis. The summary API itself remains unfiltered;
+the report subtracts filtered windows from its totals after metadata loads.
+On the tailnet, filtered windows remain visible in grey in the diary, report
+barcodes, and player waveform; filtered diamonds use 0.3 idle opacity and 1
+on hover. Operator waveform/day/week counts show the retained count followed
+by the number filtered out. Public views continue to hide filtered windows.
