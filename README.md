@@ -619,8 +619,8 @@ saved values, `filter_<label>_min` and `filter_<label>_max` for all nine sample
 labels, plus `positive`, `negative`, and `delta`. Positive is the maximum
 of bark/yap; negative is the maximum of the other seven labels; delta is
 positive minus negative. Defaults are 0–1 for individual/positive/negative
-ranges, and −1–1 for delta. Delta's minimum setting is constrained to [−1, 0]
-and its maximum to [0, 1]; all other bounds are in [0, 1]. New settings are
+ranges, and −1–1 for delta. Both delta bounds can range over [−1, 1], with minimum ≤ maximum; all other
+bounds are in [0, 1]. New settings are
 seeded on the next writable `openDb()` without overwriting existing values.
 
 `GET /api/settings` on the public API returns `{key, value, description}[]`

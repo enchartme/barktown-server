@@ -898,9 +898,11 @@ test('presentation filter settings are public to read and private to update atom
   assert.equal(aggregate.status, 200);
   const publicSettings = await (await fetch(`${publicServer.baseUrl}/api/settings`)).json();
   assert.equal(publicSettings.find(row => row.key === 'filter_delta_min').value, -.4);
-  for (const invalid of [{ filter_delta_min: .1 }, { filter_delta_max: -.1 }, { filter_positive_min: 1.1 }]) {
+  for (const invalid of [{ filter_delta_min: 1.1 }, { filter_delta_max: -1.1 }, { filter_delta_min: .7 }, { filter_positive_min: 1.1 }]) {
     assert.equal((await update(privateServer.baseUrl, invalid)).status, 400);
   }
+  assert.equal((await update(privateServer.baseUrl, { filter_delta_min: .2, filter_delta_max: .6 })).status, 200);
+  assert.equal((await update(privateServer.baseUrl, { filter_delta_min: -.6, filter_delta_max: -.2 })).status, 200);
   assert.equal((await update(privateServer.baseUrl, {
     filter_positive_min: 0, filter_positive_max: 1,
     filter_negative_min: 0, filter_negative_max: 1,

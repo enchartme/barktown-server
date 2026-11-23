@@ -21,13 +21,18 @@ test('filter defaults migrate idempotently and saved bounds persist for readonly
     assert.equal(listSettings(reader).length, 24);
     assert.equal(listSettings(reader).find(row => row.key === 'filter_delta_min').value, -1);
     updateFilterSettings(db, { filter_delta_min: -.75, filter_delta_max: .5, filter_positive_min: .6, filter_negative_max: .8 });
-    for (const invalid of [{ filter_delta_min: .1 }, { filter_delta_min: -1.1 }, { filter_delta_max: -.1 }, { filter_delta_max: 1.1 }, { filter_positive_max: .5 }, { filter_negative_max: -.1 }]) {
+    for (const invalid of [{ filter_delta_min: 1.1 }, { filter_delta_min: -1.1 }, { filter_delta_max: -1.1 }, { filter_delta_max: 1.1 }, { filter_positive_max: .5 }, { filter_negative_max: -.1 }]) {
       assert.throws(() => updateFilterSettings(db, invalid));
     }
     assert.equal(listSettings(reader).find(row => row.key === 'filter_delta_min').value, -.75);
     assert.equal(listSettings(reader).find(row => row.key === 'filter_wind_min').value, .2);
     assert.throws(() => updateFilterSettings(db, { filter_wind_min: .9 }), /minimum/);
     assert.equal(listSettings(reader).find(row => row.key === 'filter_wind_min').value, .2);
+    updateFilterSettings(db, { filter_delta_min: .25, filter_delta_max: .75 });
+    assert.equal(listSettings(reader).find(row => row.key === 'filter_delta_min').value, .25);
+    updateFilterSettings(db, { filter_delta_min: -.75, filter_delta_max: -.25 });
+    assert.equal(listSettings(reader).find(row => row.key === 'filter_delta_max').value, -.25);
+    assert.throws(() => updateFilterSettings(db, { filter_delta_min: 0 }), /minimum/);
     db.exec('DROP TABLE settings');
     assert.equal(listSettings(reader).find(row => row.key === 'filter_wind_min').value, 0);
     db.close();
