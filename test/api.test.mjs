@@ -873,7 +873,7 @@ test('presentation filter settings are public to read and private to update atom
   const get = await fetch(`${publicServer.baseUrl}/api/settings`);
   assert.equal(get.status, 200);
   const defaults = await get.json();
-  assert.equal(defaults.length, 18);
+  assert.equal(defaults.length, 24);
   assert.equal(defaults.find(row => row.key === 'filter_bark_min').value, 0);
   assert.equal(defaults.find(row => row.key === 'filter_bark_max').value, 1);
   assert.ok(defaults.every(row => row.description));
@@ -889,4 +889,21 @@ test('presentation filter settings are public to read and private to update atom
   assert.equal(saved.find(row => row.key === 'filter_bark_min').value, .7);
   assert.equal(saved.find(row => row.key === 'filter_bark_max').value, .9);
   assert.equal((await update(privateServer.baseUrl, { filter_bark_min: 0, filter_bark_max: 1 })).status, 200);
+  assert.equal(defaults.find(row => row.key === 'filter_delta_min').value, -1);
+  const aggregate = await update(privateServer.baseUrl, {
+    filter_positive_min: .5, filter_positive_max: .9,
+    filter_negative_min: .1, filter_negative_max: .8,
+    filter_delta_min: -.4, filter_delta_max: .6,
+  });
+  assert.equal(aggregate.status, 200);
+  const publicSettings = await (await fetch(`${publicServer.baseUrl}/api/settings`)).json();
+  assert.equal(publicSettings.find(row => row.key === 'filter_delta_min').value, -.4);
+  for (const invalid of [{ filter_delta_min: .1 }, { filter_delta_max: -.1 }, { filter_positive_min: 1.1 }]) {
+    assert.equal((await update(privateServer.baseUrl, invalid)).status, 400);
+  }
+  assert.equal((await update(privateServer.baseUrl, {
+    filter_positive_min: 0, filter_positive_max: 1,
+    filter_negative_min: 0, filter_negative_max: 1,
+    filter_delta_min: -1, filter_delta_max: 1,
+  })).status, 200);
 });

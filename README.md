@@ -616,7 +616,12 @@ restoring SQLite and MinIO, or redeploying an existing Barktown service.
 `settings` is a key/value SQLite table with `key`, `value` (TEXT), and
 `description`. Writable `openDb()` calls create it and seed, without overwriting
 saved values, `filter_<label>_min` and `filter_<label>_max` for all nine sample
-labels. Defaults are 0 and 1 respectively.
+labels, plus `positive`, `negative`, and `delta`. Positive is the maximum
+of bark/yap; negative is the maximum of the other seven labels; delta is
+positive minus negative. Defaults are 0–1 for individual/positive/negative
+ranges, and −1–1 for delta. Delta's minimum setting is constrained to [−1, 0]
+and its maximum to [0, 1]; all other bounds are in [0, 1]. New settings are
+seeded on the next writable `openDb()` without overwriting existing values.
 
 `GET /api/settings` on the public API returns `{key, value, description}[]`
 with numeric filter values. The private API also supports this read and accepts
@@ -628,12 +633,14 @@ settings updates. A public reader of a pre-migration database returns defaults.
 
 The tailnet-only ⚙️ menu edits these shared filters. The browser applies them
 to diary/report hit displays and bark counts, retaining each window only when
-all available label scores satisfy the inclusive ranges. Missing diagnostics
+all available label and aggregate scores satisfy the inclusive ranges. Group
+maxima use the available scores; an entirely missing group passes its filter.
+Delta is unavailable unless both groups have scores. Missing diagnostics
 pass through. Raw metadata, binary detection, recording durations, disturbance
 counts, and training annotations are unchanged. Other open browsers refresh
 settings when they regain focus. Slider changes save on release (including
-keyboard adjustments); Reset ranges immediately restores 0–1 for every label
-and saves, restoring all windows without reanalysis. The summary API itself remains unfiltered;
+keyboard adjustments); Reset ranges immediately restores the unfiltered defaults
+(including −1–1 for delta) and saves, restoring all windows without reanalysis. The summary API itself remains unfiltered;
 the report subtracts filtered windows from its totals after metadata loads.
 On the tailnet, filtered windows remain visible in grey in the diary, report
 barcodes, and player waveform; filtered diamonds use 0.3 idle opacity and 1
