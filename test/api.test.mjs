@@ -868,3 +868,25 @@ test("hit metadata rejects malformed diagnostics without replacing the saved res
   assert.deepEqual(saved.multilabelScores, payload.multilabel_scores);
   assert.deepEqual(saved.timestamps, payload.timestamps);
 });
+
+test('presentation filter settings are public to read and private to update atomically', async () => {
+  const get = await fetch(`${publicServer.baseUrl}/api/settings`);
+  assert.equal(get.status, 200);
+  const defaults = await get.json();
+  assert.equal(defaults.length, 18);
+  assert.equal(defaults.find(row => row.key === 'filter_bark_min').value, 0);
+  assert.equal(defaults.find(row => row.key === 'filter_bark_max').value, 1);
+  assert.ok(defaults.every(row => row.description));
+  const update = (base, body) => fetch(`${base}/api/settings`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal((await update(publicServer.baseUrl, { filter_bark_min: .7 })).status, 404);
+  assert.equal((await update(privateServer.baseUrl, { filter_bark_min: .7, filter_bark_max: .9 })).status, 200);
+  for (const invalid of [{ filter_bark_min: .95 }, { filter_bark_min: -1 }, { filter_bark_max: '1' }, { filter_unknown_min: 0 }, { filter_bark_min: .8, filter_yap_max: 2 }]) {
+    assert.equal((await update(privateServer.baseUrl, invalid)).status, 400);
+  }
+  const saved = await (await fetch(`${publicServer.baseUrl}/api/settings`)).json();
+  assert.equal(saved.find(row => row.key === 'filter_bark_min').value, .7);
+  assert.equal(saved.find(row => row.key === 'filter_bark_max').value, .9);
+  assert.equal((await update(privateServer.baseUrl, { filter_bark_min: 0, filter_bark_max: 1 })).status, 200);
+});

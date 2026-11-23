@@ -610,3 +610,27 @@ Examples of valid names:
 
 See [the Pi and Dokploy runbook](deploy/README.md) for a fresh installation,
 restoring SQLite and MinIO, or redeploying an existing Barktown service.
+
+### Diary/report presentation filters
+
+`settings` is a key/value SQLite table with `key`, `value` (TEXT), and
+`description`. Writable `openDb()` calls create it and seed, without overwriting
+saved values, `filter_<label>_min` and `filter_<label>_max` for all nine sample
+labels. Defaults are 0 and 1 respectively.
+
+`GET /api/settings` on the public API returns `{key, value, description}[]`
+with numeric filter values. The private API also supports this read and accepts
+`PATCH /api/settings` with a key/value object, e.g.
+`{"filter_bark_min":0.7,"filter_homestead_max":0.5}`. Updates are atomic;
+unknown keys, nonnumeric/out-of-range values, and min > max return 400.
+Start/restart a writable service to migrate existing databases before using
+settings updates. A public reader of a pre-migration database returns defaults.
+
+The tailnet-only ⚙️ menu edits these shared filters. The browser applies them
+to diary/report hit displays and bark counts, retaining each window only when
+all available label scores satisfy the inclusive ranges. Missing diagnostics
+pass through. Raw metadata, binary detection, recording durations, disturbance
+counts, and training annotations are unchanged. Other open browsers refresh
+settings when they regain focus; reset all ranges to 0–1 and save to restore
+all windows without reanalysis. The summary API itself remains unfiltered;
+the report subtracts hidden windows from its totals after metadata loads.

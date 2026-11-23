@@ -64,7 +64,7 @@ import {
   upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertDataQuality, getDataQuality, listDataQualityPage, deleteDataQualityRow, moveDataQualityRecord,
   upsertSample, insertSampleIfAbsent,
-  listMonitorParams, getMonitorParamsMap, setMonitorParam,
+  listMonitorParams, getMonitorParamsMap, setMonitorParam, listSettings, updateFilterSettings,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 import {
@@ -605,6 +605,17 @@ async function listAvailableSourceWavKeys({ strict = false } = {}) {
 }
 
 app.get("/health", async () => ({ ok: true }));
+
+publicApi.get('/api/settings', async () => listSettings(db));
+privateApi.get('/api/settings', async () => listSettings(db));
+privateApi.patch('/api/settings', async (req, reply) => {
+  try {
+    return updateFilterSettings(db, req.body);
+  } catch (error) {
+    return reply.code(400).send({ error: error.message });
+  }
+});
+
 
 // Public, non-sensitive recording context used to describe generated reports.
 publicApi.get("/api/recording-context", async () => ({
