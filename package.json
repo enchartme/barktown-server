@@ -31,6 +31,7 @@
     "compare-index-with-list": "node compare-index-with-list.mjs",
     "check-sizes": "node check-sizes.mjs",
     "bulk-reanalyze": "node bulk-reanalyze.mjs",
+    "historical-worker": "node historical-worker.mjs",
     "observe": "journalctl -u barktown-ingest -f",
     "migrate-auto-detection-names": "node migrations/auto-detection-canonical-names/migrate-auto-detection-canonical-names.mjs",
     "test": "node --test test/*.test.mjs migrations/auto-detection-canonical-names/*.test.mjs"

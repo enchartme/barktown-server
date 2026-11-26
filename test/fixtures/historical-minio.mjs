@@ -16,8 +16,23 @@ Client.prototype.statObject = async function (_bucket, key) {
   return { size: data.length, etag: createHash('sha256').update(data).digest('hex') };
 };
 Client.prototype.copyObject = async function (_bucket, key, from) {
+  if (typeof _bucket !== 'string') {
+    const source = _bucket, destination = key;
+    key = destination.Object;
+    from = `/${source.Bucket}/${source.Object}`;
+    const current = await this.statObject(source.Bucket, source.Object);
+    if (source.MatchETag && source.MatchETag !== current.etag) throw new Error('Source ETag changed');
+    if (fs.existsSync(path.join(root, 'fail-copy')) && fs.readFileSync(path.join(root, 'fail-copy'), 'utf8') === key) {
+      throw new Error('Simulated publication failure');
+    }
+    fs.mkdirSync(path.dirname(path.join(root, '.metadata', key)), { recursive: true });
+    fs.writeFileSync(path.join(root, '.metadata', key), JSON.stringify(destination.Headers));
+  }
   fs.mkdirSync(path.dirname(location(key)), { recursive: true });
   fs.copyFileSync(location(from.replace(/^\/[^/]+\//, '')), location(key));
+  if (key.endsWith('.json') && fs.existsSync(path.join(root, 'delete-after-copy'))) {
+    fs.rmSync(location(fs.readFileSync(path.join(root, 'delete-after-copy'), 'utf8')), { force: true });
+  }
 };
 Client.prototype.fGetObject = async function (_bucket, key, destination) {
   fs.copyFileSync(location(key), destination);

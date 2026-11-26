@@ -428,6 +428,10 @@ analyzer running during imports.
 
 ### Bulk re-analysis by date
 
+For processing on a Mac or another workstation, use the local worker below.
+`bulk-reanalyze` submits scoring to the Pi's configured analyzer; it does not
+move media processing to the machine running the CLI.
+
 For a one-time historical import, reuse the CLI with **`--historical`**. This
 selects only original AAC/M4A records (`reanalysisMode: "historical"`), excluding
 ordinary Goblin recordings and already-created historical event clips. Preview
@@ -494,7 +498,6 @@ is needed to add diagnostic scores at the current production threshold.
 Successful records have hit metadata/automatic trim replaced and approval
 cleared, just like the individual UI action. Missing source WAVs are skipped.
 Keep the terminal open until the final summary appears.
-
 
 Run the server-local CLI with one real calendar date, or an explicit inclusive
 date range. It loads the current diary, selects only matching entries whose
@@ -571,8 +574,8 @@ a best-effort basis (the database is the source of truth, and
 | `REANALYZE_TIMEOUT_MS` | Compose: `330000`; local: `300000` | Maximum time for one synchronous re-analysis request |
 | `REANALYZE_MAX_STDOUT_BYTES` | `2097152` | Reject oversized HTTP results or local subprocess stdout |
 | `REANALYZE_MAX_STDERR_BYTES` | `131072` | Kill an analyzer whose diagnostic output exceeds this size |
-| `REANALYZE_CONCURRENCY` | `1` | Total active worker slots across all requests |
-| `REANALYZE_WORKERS_PER_JOB` | `1` | Workers for one interactive request, capped by the total; bulk requests always use one |
+| `REANALYZE_CONCURRENCY` | Compose: `3`; local: `1` | Total active worker slots across all requests |
+| `REANALYZE_WORKERS_PER_JOB` | Compose: `3`; local: `1` | Workers per file, including historical replay; capped by the total. Local bulk uses one. |
 | `BULK_REANALYZE_PUBLIC_API_URL` | `http://127.0.0.1:$PUBLIC_API_PORT` | Read API used by `npm run bulk-reanalyze` |
 | `BULK_REANALYZE_PRIVATE_API_URL` | `http://127.0.0.1:$PRIVATE_API_PORT` | Mutation API used by `npm run bulk-reanalyze` |
 
@@ -605,6 +608,81 @@ variants. `npm start`, `npm run server`, and `npm run server:private` remain
 foreground commands for local development and debugging.
 
 ---
+
+### Historical imports on a Mac or workstation
+
+Deploy the updated **server** first. Run `historical-worker.mjs` from this
+checkout on the workstation. The workstation reads the original, decodes it,
+scores it with the sibling Goblin checkout, creates MP3/WAV/waveform files, and
+uploads them into `historical-import-staging/<ticket UUID>/`. It never opens
+the production SQLite database or writes final public media paths.
+
+The private API archives the original and freezes monitor settings and media
+configuration in a durable import ticket. At commit it recomputes every final
+path and clip timestamp, checks that the source is unchanged, verifies the
+source and staged-file SHA-256 hashes, probes WAV/MP3 formats and durations, and
+validates the waveform data. It refuses missing files, collisions and changed
+recordings. Only after all checks pass does it publish files at their final
+keys with the correct Content-Type, then atomically replace diary rows and
+hit metadata. Original public files are removed afterwards; the archived source
+remains intact. The Pi runs file verification and database work, with decoding,
+model inference, MP3 encoding and waveform generation left to the workstation.
+
+For a mounted bucket, pass its **bucket root** (the directory containing
+`audio/`, `waveforms/`, etc.). Preview first, then omit `--dry-run` to process:
+
+```bash
+cd /Volumes/d/git/enchartme/barktown-server
+npm run historical-worker -- \
+  --start-date 2023-01-01 --end-date 2023-12-31 \
+  --threshold 0.8 --workers 3 \
+  --bucket-root /path/to/mounted/barktown \
+  --state-file ./data/mac-historical-2023.json \
+  --dry-run
+```
+
+Without `--bucket-root`, the worker uses the MinIO API and the usual `MINIO_*`
+settings from this checkout's `.env`. `--api-base` (or
+`HISTORICAL_WORKER_API_URL`) overrides the private API, defaulting to
+`https://barktown-private.tail523149.ts.net`. `--public-api-base` (or
+`BULK_REANALYZE_PUBLIC_API_URL`) overrides the public diary API. Only original
+historical AAC/M4A entries are selected. Threshold/window/refractory/step flags
+match `bulk-reanalyze`; unspecified settings come from the Pi's monitor database.
+
+The worker needs local `ffmpeg`, `ffprobe`, `audiowaveform`, Python dependencies
+and the Goblin model bundle, including `models/analyzer/yamnet.tflite`. It
+automatically finds this workspace's `barktown-ui/.bin/ffmpeg` and `ffprobe`,
+and Goblin's or barktown-utils' virtual environment when available. Explicit
+`FFMPEG_BIN`, `FFPROBE_BIN`, `AUDIOWAVEFORM_BIN`, `REANALYZE_PYTHON_BIN`,
+`REANALYZE_SCRIPT_PATH` and `REANALYZE_MODEL_DIR` override those defaults.
+`REANALYZE_URL` is ignored: this command always performs local scoring.
+
+For an unattended Mac run, use the same arguments with:
+
+```bash
+mkdir -p ./data
+nohup caffeinate -i node historical-worker.mjs \
+  --start-date 2023-01-01 --end-date 2023-12-31 --threshold 0.8 \
+  --bucket-root /path/to/mounted/barktown \
+  --state-file ./data/mac-historical-2023.json \
+  > ./data/mac-historical-2023.log 2>&1 < /dev/null &
+```
+
+Rerun the same command and state file to resume. The checkpoint preserves the
+selected queue, frozen ticket and completed recordings, including sources with
+zero events. Scores are saved before encoding, so an interrupted upload can
+resume without rescoring. Commit receipts and partial-publication intent live
+in the Pi's SQLite database and survive API restarts; retrying a lost commit
+response cannot duplicate diary entries. The worker stops at the first error
+and retains its checkpoint and work files for recovery. Keep the state file
+and its adjacent `.files/` directory together. Checkpoints are locked to one
+worker process at a time. Scoring itself does not reserve the Pi's analyzer;
+an overlapping import or source change causes validation to refuse the commit.
+
+Private worker endpoints are `POST /api/diary/:id/historical-import`,
+`GET /api/historical-imports/:ticketId`, and
+`POST /api/historical-imports/:ticketId/commit`. They are not exposed by the
+public API. No recording-Pi or UI deployment is required for this workflow.
 
 ## Tests
 

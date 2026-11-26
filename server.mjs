@@ -49,6 +49,7 @@ import { createReanalysisJobs, ReanalysisBusyError } from "./lib/reanalysis-jobs
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
 import { availableRecordingSource, isHistoricalRecording } from './lib/historical-recordings.mjs';
 import { importHistoricalRecording } from './lib/historical-import.mjs';
+import { createExternalHistoricalImports } from './lib/external-historical-import.mjs';
 import { validateMultilabelScores } from "./lib/hit-metadata.mjs";
 import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
 import {
@@ -90,6 +91,10 @@ const reanalysisLimiter = isPublicApi
   : createReanalysisLimiter({ concurrency: CFG.reanalyze.concurrency });
 
 const reanalysisJobs = createReanalysisJobs();
+const externalHistoricalImports = isPublicApi ? null : createExternalHistoricalImports({
+  db, cfg: CFG, mc, stat: statObjectIfExists, warn,
+  validate: payload => validateHitMetadataPayload(payload, { requireProvenance: true, requireWindow: true }),
+});
 
 const app = Fastify({ logger: false });
 const corsMethods = isPublicApi
@@ -1174,6 +1179,20 @@ privateApi.get("/api/reanalysis", async (_req, reply) => {
   reply.header("Cache-Control", "no-store");
   return reanalysisJobs.snapshot();
 });
+
+// External workers prepare media; only the private API publishes and commits it.
+privateApi.post('/api/diary/:id/historical-import', (req, reply) => {
+  const error = validateReanalyzeTuning(req.body);
+  if (error) return reply.code(400).send({ error });
+  return exclusiveReanalysis(req.params.id, () => externalHistoricalImports.begin(req.params.id,
+    resolveReanalyzeTuning(req.body).replayMonitorSettings, req.body?.requestId), reply);
+});
+privateApi.get('/api/historical-imports/:id', (req, reply) => {
+  const job = externalHistoricalImports.get(req.params.id);
+  return job ?? reply.code(404).send({ error: 'Import ticket not found' });
+});
+privateApi.post('/api/historical-imports/:id/commit', { bodyLimit: 34 * 1024 * 1024 }, (req, reply) =>
+  exclusiveReanalysis(`external:${req.params.id}`, () => externalHistoricalImports.commit(req.params.id, req.body), reply));
 
 async function exclusiveReanalysis(recordId, operation, reply) {
   try { return await reanalysisJobs.run(recordId, operation); }
