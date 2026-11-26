@@ -104,6 +104,7 @@ async function main() {
     console.log(`Usage: npm run historical-worker -- YYYY-MM-DD [options]
    or: npm run historical-worker -- --start-date YYYY-MM-DD --end-date YYYY-MM-DD [options]
 Options: --threshold N; --refractory SECONDS; --window SECONDS; --step SECONDS
+         --upload-min-score N|any (any = 0; default from Pi monitor settings)
          --workers N (default 3); --bucket-root PATH (otherwise use MinIO API)
          --state-file PATH; --api-base URL; --public-api-base URL; --dry-run
 Run on the workstation. The Pi validates staged files and commits database changes.

@@ -8,7 +8,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { startTestServer } from './helpers/test-server.mjs';
-import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata, getDiaryNote, upsertDiaryNote } from '../lib/db.mjs';
+import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata, getDiaryNote, upsertDiaryNote,
+  setMonitorParam, getMonitorParamsMap } from '../lib/db.mjs';
 import { parseFilename } from '../lib/filenames.mjs';
 import { planHistoricalClips } from '../lib/historical-recordings.mjs';
 import { historicalStagingFiles } from '../lib/historical-media.mjs';
@@ -100,8 +101,12 @@ async function setup(t) {
 test('external import verifies and publishes media, preserves notes and retries a committed ticket after API restart', async t => {
   const f = await setup(t);
   const entry = f.seed(); upsertDiaryNote(f.db, entry.id, 'A diary note');
-  const ticket = await f.begin(entry, { candidateThreshold: .8 });
+  setMonitorParam(f.db, 'upload_min_score', .99);
+  const ticket = await f.begin(entry, { candidateThreshold: .8, uploadMinScore: 0 });
   assert.equal(ticket.monitorSettings.candidate_threshold, .8);
+  assert.equal(ticket.monitorSettings.upload_min_score, 0);
+  assert.equal(getMonitorParamsMap(f.db).upload_min_score, .99);
+  assert.equal((await f.begin(entry)).monitorSettings.upload_min_score, .99, 'omitting the override inherits the live setting');
   const manifest = f.stage(ticket);
   const route = `/api/historical-imports/${ticket.id}/commit`;
   assert.equal((await fetch(f.publicApi.baseUrl + route, { method: 'POST' })).status, 404);
@@ -216,8 +221,10 @@ test('the Pi rechecks the complete published file set before committing the data
 test('Mac CLI supports mounted and S3 buckets, read-only previews and completed checkpoints', async t => {
   for (const mounted of [true, false]) await t.test(mounted ? 'mount' : 'S3', async t => {
     const f = await setup(t); const entry = f.seed();
+    setMonitorParam(f.db, 'upload_min_score', .99);
     const args = ['historical-worker.mjs', '--start-date', '2023-05-31', '--end-date', '2023-05-31',
       '--api-base', f.privateUrl(), '--public-api-base', f.publicApi.baseUrl, '--threshold', '.8',
+      '--upload-min-score', mounted ? 'any' : '0',
       '--state-file', path.join(f.tmp, 'checkpoint.json'), ...(mounted ? ['--bucket-root', f.store] : [])];
     const options = { cwd: new URL('..', import.meta.url), env: { ...process.env, ...f.env } };
     const preview = await execute(process.execPath, [...args, '--dry-run'], options);
@@ -226,6 +233,9 @@ test('Mac CLI supports mounted and S3 buckets, read-only previews and completed 
     const run = await execute(process.execPath, args, options);
     assert.match(run.stdout, /1 historical source\(s\) committed/);
     assert.equal(getDiaryEntry(f.db, entry.id), undefined);
+    const imported = f.db.prepare('SELECT id FROM diary_entries').get();
+    assert.equal(getHitMetadata(f.db, imported.id).analysisSettings.monitor.upload_min_score, 0);
+    assert.equal(getMonitorParamsMap(f.db).upload_min_score, .99);
     const again = await execute(process.execPath, args, options);
     assert.match(again.stdout, /checkpoint are complete/);
     assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), 'scored\n');

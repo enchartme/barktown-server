@@ -19,6 +19,7 @@ try {
   console.error("Usage: npm run bulk-reanalyze -- YYYY-MM-DD");
   console.error("   or: npm run bulk-reanalyze -- --start-date YYYY-MM-DD --end-date YYYY-MM-DD [options]");
   console.error("Options: -t, --threshold N; -r, --refractory SECONDS; -w, --window SECONDS; -s, --step SECONDS");
+  console.error('         --upload-min-score N|any (historical replay only; any = 0)');
   console.error('         --historical (only original AAC/M4A imports); --dry-run (list without processing)');
   console.error(`Error: ${error.message}`);
   process.exit(2);

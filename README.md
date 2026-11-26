@@ -526,10 +526,18 @@ Per-run analyzer overrides are optional:
 | `-r`, `--refractory` | `hit_refractory_s` | `>= 0` seconds |
 | `-w`, `--window` | `inference_window_s` | `>= 0.1` seconds |
 | `-s`, `--step` | `score_interval_s` | `>= 0.05` seconds |
+| `--upload-min-score` | `upload_min_score` (historical replay only) | `0..1`, or `any` for `0` |
 
 Only supplied options override the current SQLite `monitor_params` values for
 this CLI run. They are sent with every selected request and recorded in its
 hit-metadata provenance; the database defaults themselves are not changed.
+
+For example, `--threshold 0.8 --upload-min-score any` accepts confirmed replay
+events without an additional peak-score cutoff. `--upload-min-score 0` is
+equivalent. The private API accepts `{ "uploadMinScore": 0 }` on individual,
+day and external-worker import requests. This is a per-run override; it does
+not change the live Goblin monitor. Confirmation-hit and upload-cooldown gates
+still apply. Omitting the option uses the current database setting.
 
 The CLI reads the diary from `http://127.0.0.1:$PUBLIC_API_PORT` and submits work to
 `http://127.0.0.1:$PRIVATE_API_PORT` outside Docker. Compose sets the read
@@ -635,7 +643,7 @@ For a mounted bucket, pass its **bucket root** (the directory containing
 cd /Volumes/d/git/enchartme/barktown-server
 npm run historical-worker -- \
   --start-date 2023-01-01 --end-date 2023-12-31 \
-  --threshold 0.8 --workers 3 \
+  --threshold 0.8 --upload-min-score any --workers 3 \
   --bucket-root /path/to/mounted/barktown \
   --state-file ./data/mac-historical-2023.json \
   --dry-run
@@ -662,7 +670,7 @@ For an unattended Mac run, use the same arguments with:
 ```bash
 mkdir -p ./data
 nohup caffeinate -i node historical-worker.mjs \
-  --start-date 2023-01-01 --end-date 2023-12-31 --threshold 0.8 \
+  --start-date 2023-01-01 --end-date 2023-12-31 --threshold 0.8 --upload-min-score any \
   --bucket-root /path/to/mounted/barktown \
   --state-file ./data/mac-historical-2023.json \
   > ./data/mac-historical-2023.log 2>&1 < /dev/null &

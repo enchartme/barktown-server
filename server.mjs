@@ -501,6 +501,7 @@ const REANALYZE_TUNING_FIELDS = {
   hitRefractoryS:     { paramId: "hit_refractory_s", min: 0 },
   inferenceWindowS:   { paramId: "inference_window_s", min: 0.1 },
   scoreIntervalS:     { paramId: "score_interval_s", min: 0.05 },
+  uploadMinScore:     { paramId: "upload_min_score", min: 0, max: 1, replayOnly: true },
 };
 
 const BULK_REANALYZE_MODE_HEADER = "x-barktown-reanalysis-mode";
@@ -528,13 +529,18 @@ function validateReanalyzeTuning(body) {
 function resolveReanalyzeTuning(body) {
   const monitorParams = getMonitorParamsMap(db);
   const monitorSettings = {};
-  for (const [bodyField, { paramId }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+  for (const [bodyField, { paramId, replayOnly }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+    if (replayOnly) continue;
     monitorSettings[paramId] = body?.[bodyField] ?? monitorParams[paramId];
   }
   const replayNames = ['confirmation_hits', 'confirmation_window_s', 'silence_gap_s', 'cooldown_s',
     'max_clip_s', 'padding_s', 'upload_min_score', 'upload_cooldown_s'];
-  return { monitorSettings, replayMonitorSettings: { ...monitorSettings,
-    ...Object.fromEntries(replayNames.map(name => [name, monitorParams[name]])) } };
+  const replayMonitorSettings = { ...monitorSettings,
+    ...Object.fromEntries(replayNames.map(name => [name, monitorParams[name]])) };
+  for (const [bodyField, { paramId, replayOnly }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
+    if (replayOnly) replayMonitorSettings[paramId] = body?.[bodyField] ?? monitorParams[paramId];
+  }
+  return { monitorSettings, replayMonitorSettings };
 }
 
 /** Stat an object, returning null only for a genuine not-found response. */

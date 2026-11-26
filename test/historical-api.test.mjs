@@ -7,7 +7,8 @@ import http from 'node:http';
 import { setTimeout } from 'node:timers/promises';
 import { startTestServer } from './helpers/test-server.mjs';
 import { parseFilename } from '../lib/filenames.mjs';
-import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata, deleteHitMetadataRow, saveReanalysisResult } from '../lib/db.mjs';
+import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata, deleteHitMetadataRow, saveReanalysisResult,
+  setMonitorParam, getMonitorParamsMap } from '../lib/db.mjs';
 
 async function until(read, check) {
   for (let i = 0; i < 200; i++) {
@@ -35,6 +36,7 @@ test('historical UI request archives, replays and publishes clips; upload failur
     return entry;
   }
   const first = seed('2023-05-31 23-59-00 barks at car.aac');
+  setMonitorParam(db, 'upload_min_score', .99);
   // Fake codecs exercise real command execution, arguments, and storage sequencing.
   const binary = path.join(tmp, 'audio-tool');
   fs.writeFileSync(binary, `#!${process.execPath}
@@ -54,6 +56,7 @@ test('historical UI request archives, replays and publishes clips; upload failur
     assert.equal(settings.silence_gap_s, 120);
     assert.equal(settings.confirmation_hits, 4);
     assert.equal(settings.padding_s, 1.5);
+    assert.equal(settings.upload_min_score, 0, 'per-run zero overrides the live .99 peak gate');
     if (received === 1) await new Promise(resolve => { release = resolve; });
     res.setHeader('Content-Type', 'application/json');
     if (failAnalysis) { res.writeHead(502); res.end(JSON.stringify({ error: 'Scoring failed' })); return; }
@@ -74,11 +77,14 @@ test('historical UI request archives, replays and publishes clips; upload failur
     REANALYZE_CONCURRENCY: '3', REANALYZE_WORKERS_PER_JOB: '3' };
   const privateApi = await startTestServer({ dbPath, mode: 'private', env }); t.after(() => privateApi.stop());
   const publicApi = await startTestServer({ dbPath, mode: 'public', env }); t.after(() => publicApi.stop());
-  const post = id => fetch(`${privateApi.baseUrl}/api/diary/${id}/reanalyze`, { method: 'POST' });
+  const post = (id, uploadMinScore = 0) => fetch(`${privateApi.baseUrl}/api/diary/${id}/reanalyze`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uploadMinScore }),
+  });
   const status = () => fetch(`${privateApi.baseUrl}/api/reanalysis`).then(r => r.json());
   const listed = await fetch(`${publicApi.baseUrl}/api/diary`).then(r => r.json());
   assert.equal(listed.find(e => e.id === first.id).reanalyzable, true);
   assert.equal(listed.find(e => e.id === first.id).reanalysisMode, 'historical');
+  for (const value of [-1, 1.1, 'any', null]) assert.equal((await post(first.id, value)).status, 400);
   assert.equal((await post(first.id)).status, 202);
   await until(() => received, n => n === 1);
   assert.ok(fs.existsSync(path.join(store, first.audioPath.replace('audio/', 'historical-recordings-archive/'))));
@@ -158,11 +164,12 @@ test('historical UI request archives, replays and publishes clips; upload failur
   const beforeBulk = received;
   const bulk = await fetch(`${privateApi.baseUrl}/api/diary/reanalyze-day`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ date: '2023-05-29' }),
+    body: JSON.stringify({ date: '2023-05-29', uploadMinScore: 0 }),
   });
   assert.equal(bulk.status, 202);
   const bulkDone = await until(status, s => !s.active);
   assert.equal(bulkDone.failed, 0, JSON.stringify(bulkDone.errors));
   assert.equal(bulkDone.completed, 2);
   assert.equal(received - beforeBulk, 2, 'each historical bulk recording requests three workers');
+  assert.equal(getMonitorParamsMap(db).upload_min_score, .99, 'single and day overrides leave live settings unchanged');
 });

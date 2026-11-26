@@ -23,7 +23,8 @@ test('historical CLI dry run is read-only and real runs await each background jo
     }
     if (req.method === 'POST') {
       assert.equal(current, null, 'previous job must finish before the next POST');
-      for await (const _chunk of req) { /* drain */ }
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      assert.equal(JSON.parse(Buffer.concat(chunks).toString()).uploadMinScore, 0);
       const recordId = decodeURIComponent(url.pathname.split('/')[3]);
       posts.push(recordId);
       polls = 0;
@@ -44,7 +45,8 @@ test('historical CLI dry run is read-only and real runs await each background jo
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   const env = { ...process.env, BULK_REANALYZE_PUBLIC_API_URL: base, BULK_REANALYZE_PRIVATE_API_URL: base };
-  const args = ['bulk-reanalyze.mjs', '--historical', '--start-date', '2023-05-01', '--end-date', '2023-05-02'];
+  const args = ['bulk-reanalyze.mjs', '--historical', '--start-date', '2023-05-01', '--end-date', '2023-05-02',
+    '--upload-min-score', '0'];
   const cwd = new URL('..', import.meta.url);
   const preview = await execute(process.execPath, [...args, '--dry-run'], { cwd, env });
   assert.match(preview.stdout, /WOULD RUN earlier/);

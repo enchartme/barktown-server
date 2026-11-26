@@ -51,6 +51,19 @@ test("bulk arguments reject incomplete ranges, invalid bounds, and mixed date fo
   ]), /not both/);
 });
 
+test('historical upload minimum accepts zero or any and rejects invalid scores', () => {
+  for (const value of ['0', 'any', 'ANY']) {
+    assert.deepEqual(parseBulkReanalyzeArgs(['2026-05-29', '--upload-min-score', value]).tuning,
+      { uploadMinScore: 0 });
+  }
+  assert.equal(parseBulkReanalyzeArgs(['2026-05-29', '--upload-min-score', '.8']).tuning.uploadMinScore, .8);
+  assert.equal(parseBulkReanalyzeArgs(['2026-05-29', '--upload-min-score', '1']).tuning.uploadMinScore, 1);
+  for (const value of ['-1', '1.1', 'NaN', 'Infinity', 'invalid']) {
+    assert.throws(() => parseBulkReanalyzeArgs(['2026-05-29', '--upload-min-score', value]), /upload minimum score/);
+  }
+  assert.throws(() => parseBulkReanalyzeArgs(['2026-05-29', '--threshold', 'any']), /threshold/);
+});
+
 test("bulk selection is limited to an inclusive date range and available sources", () => {
   const entries = [
     { id: "a", date: "2026-08-12", reanalyzable: true },
