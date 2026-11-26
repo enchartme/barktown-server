@@ -64,6 +64,30 @@ test("bulk selection is limited to an inclusive date range and available sources
   ]);
 });
 
+test('historical flags select original imports and exclude their already converted clips', () => {
+  assert.deepEqual(parseBulkReanalyzeArgs(['--historical', '--dry-run', '--start-date', '2023-01-01', '--end-date', '2023-12-31']), {
+    startDate: '2023-01-01', endDate: '2023-12-31', tuning: {}, historical: true, dryRun: true,
+  });
+  const original = { id: 'original', date: '2023-05-01', reanalyzable: true, reanalysisMode: 'historical' };
+  assert.deepEqual(selectReanalyzableEntries([original,
+    { ...original, id: 'missing', reanalyzable: false },
+    { ...original, id: 'converted', reanalysisMode: 'windows', sourceRecording: { type: 'historical' } },
+    { ...original, id: 'goblin', reanalysisMode: 'windows' },
+  ], '2023-01-01', '2023-12-31', { historical: true }), [original]);
+});
+
+test('historical bulk stops after a failure without starting remaining recordings', async () => {
+  const started = [];
+  const results = await runBulkReanalysis([{ id: 'bad' }, { id: 'remaining' }], {
+    concurrency: 1, stopOnError: true, analyze: async entry => {
+      started.push(entry.id); throw new Error('import failed');
+    },
+  });
+  assert.deepEqual(started, ['bad']);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].status, 'rejected');
+});
+
 test("bulk worker pool bounds concurrency, reports progress, and continues after failure", async () => {
   const entries = ["a", "b", "c", "d", "e"].map(id => ({ id }));
   const releases = [];

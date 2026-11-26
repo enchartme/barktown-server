@@ -9,6 +9,7 @@ import {
   runBulkReanalysis,
   selectReanalyzableEntries,
 } from "./lib/bulk-reanalyze.mjs";
+import { waitForReanalysisJob } from './lib/reanalysis-job-client.mjs';
 
 const args = process.argv.slice(2);
 let selection;
@@ -18,10 +19,11 @@ try {
   console.error("Usage: npm run bulk-reanalyze -- YYYY-MM-DD");
   console.error("   or: npm run bulk-reanalyze -- --start-date YYYY-MM-DD --end-date YYYY-MM-DD [options]");
   console.error("Options: -t, --threshold N; -r, --refractory SECONDS; -w, --window SECONDS; -s, --step SECONDS");
+  console.error('         --historical (only original AAC/M4A imports); --dry-run (list without processing)');
   console.error(`Error: ${error.message}`);
   process.exit(2);
 }
-const { startDate, endDate, tuning } = selection;
+const { startDate, endDate, tuning, historical = false, dryRun = false } = selection;
 
 const publicPort = process.env.PUBLIC_API_PORT ?? "8091";
 const privatePort = process.env.PRIVATE_API_PORT ?? process.env.API_PORT ?? "8090";
@@ -65,17 +67,26 @@ if (!Array.isArray(diary)) {
   process.exit(1);
 }
 
-const selectedEntries = diary.filter(entry => entry?.date >= startDate && entry.date <= endDate);
-const eligible = selectReanalyzableEntries(diary, startDate, endDate);
+const selectedEntries = diary.filter(entry => entry?.date >= startDate && entry.date <= endDate
+  && (!historical || entry.reanalysisMode === 'historical'));
+const eligible = selectReanalyzableEntries(diary, startDate, endDate, { historical })
+  .sort((a, b) => (a.datetimeLocal ?? a.date).localeCompare(b.datetimeLocal ?? b.date) || a.id.localeCompare(b.id));
 const skipped = selectedEntries.length - eligible.length;
 const dateLabel = startDate === endDate ? startDate : `${startDate} through ${endDate}`;
 
 console.log(`Bulk re-analysis: ${dateLabel}`);
+console.log(`Selection: ${historical ? 'historical AAC/M4A sources only' : 'all eligible recordings'}`);
 console.log(`Read API: ${publicApiBase}`);
 console.log(`Private API: ${privateApiBase}`);
 console.log(`Entries: ${selectedEntries.length}; eligible: ${eligible.length}; unavailable: ${skipped}`);
 console.log(`Concurrent recordings: ${concurrency}`);
 console.log(`Overrides: ${Object.keys(tuning).length ? JSON.stringify(tuning) : "none (using DB defaults)"}`);
+
+if (dryRun) {
+  for (const entry of eligible) console.log(`WOULD RUN ${entry.id} — ${entry.filename ?? ''}`);
+  console.log('Dry run: no recordings were processed.');
+  process.exit(0);
+}
 
 if (eligible.length === 0) {
   console.log("Nothing to re-analyze.");
@@ -84,17 +95,35 @@ if (eligible.length === 0) {
 
 const results = await runBulkReanalysis(eligible, {
   concurrency,
-  analyze: async (entry) => readJsonResponse(await fetch(
-    `${privateApiBase}/api/diary/${encodeURIComponent(entry.id)}/reanalyze`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Barktown-Reanalysis-Mode": "bulk",
-      },
-      body: JSON.stringify(tuning),
-    },
-  )),
+  stopOnError: historical,
+  analyze: async (entry) => {
+    let response;
+    try {
+      response = await fetch(`${privateApiBase}/api/diary/${encodeURIComponent(entry.id)}/reanalyze`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Barktown-Reanalysis-Mode": "bulk",
+        },
+        body: JSON.stringify(tuning),
+        ...(entry.reanalysisMode === 'historical' ? { signal: AbortSignal.timeout(30000) } : {}),
+      });
+    } catch (error) {
+      // A lost POST response may still have started a detached server job.
+      error.stopBulk = true;
+      throw error;
+    }
+    const body = await readJsonResponse(response);
+    if (response.status !== 202) return body;
+    let previousProgress;
+    return waitForReanalysisJob(body, entry.id, async () => readJsonResponse(await fetch(
+      `${privateApiBase}/api/reanalysis`, { cache: 'no-store', signal: AbortSignal.timeout(10000) },
+    )), { onProgress: job => {
+      const progress = `${job.stage ?? 'starting'}${job.eventTotal !== undefined ? ` ${job.eventsCompleted ?? 0}/${job.eventTotal} clips` : ''}`;
+      if (progress !== previousProgress) console.log(`WAIT  ${entry.id} — ${progress}`);
+      previousProgress = progress;
+    } });
+  },
   onStart: ({ entry, index, total }) => {
     console.log(`START ${String(index + 1).padStart(String(total).length)}/${total} ${entry.id}`);
   },
@@ -102,7 +131,10 @@ const results = await runBulkReanalysis(eligible, {
     const progress = `${String(completed).padStart(String(total).length)}/${total}`;
     const elapsed = `${(elapsedMs / 1000).toFixed(1)}s`;
     if (status === "fulfilled") {
-      console.log(`OK    ${progress} ${entry.id} — ${value?.timestamps?.length ?? 0} hit(s), ${elapsed}`);
+      const outcome = Array.isArray(value?.replacementIds)
+        ? `${value.replacementIds.length} event clip(s)${value.message ? `; ${value.message}` : ''}`
+        : `${value?.timestamps?.length ?? 0} hit(s)`;
+      console.log(`OK    ${progress} ${entry.id} — ${outcome}, ${elapsed}`);
     } else {
       console.error(`FAIL  ${progress} ${entry.id} — ${reason?.message ?? reason}, ${elapsed}`);
     }
@@ -112,4 +144,5 @@ const results = await runBulkReanalysis(eligible, {
 const succeeded = results.filter(result => result.status === "fulfilled").length;
 const failed = results.length - succeeded;
 console.log(`Done: ${succeeded} succeeded, ${failed} failed, ${skipped} unavailable.`);
+if (results.length < eligible.length) console.error(`Stopped: ${eligible.length - results.length} recording(s) not started. Check /api/reanalysis before rerunning.`);
 if (failed > 0) process.exitCode = 1;

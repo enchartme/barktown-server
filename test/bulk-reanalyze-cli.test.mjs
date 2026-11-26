@@ -6,6 +6,63 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 
+test('historical CLI dry run is read-only and real runs await each background job before posting the next', async t => {
+  let current = null;
+  let polls = 0;
+  let fail = false;
+  const posts = [];
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/diary') {
+      res.end(JSON.stringify([
+        { id: 'later', date: '2023-05-02', reanalyzable: true, reanalysisMode: 'historical' },
+        { id: 'earlier', date: '2023-05-01', reanalyzable: true, reanalysisMode: 'historical' },
+        { id: 'converted', date: '2023-05-01', reanalyzable: true, reanalysisMode: 'windows', sourceRecording: { type: 'historical' } },
+      ])); return;
+    }
+    if (req.method === 'POST') {
+      assert.equal(current, null, 'previous job must finish before the next POST');
+      for await (const _chunk of req) { /* drain */ }
+      const recordId = decodeURIComponent(url.pathname.split('/')[3]);
+      posts.push(recordId);
+      polls = 0;
+      current = { id: `job-${posts.length}`, instanceId: 'server', recordId, kind: 'historical', active: true, completed: 0 };
+      res.writeHead(202); res.end(JSON.stringify(current)); return;
+    }
+    if (url.pathname === '/api/reanalysis') {
+      polls++;
+      if (polls === 1) { res.end(JSON.stringify({ ...current, stage: 'analyzing' })); return; }
+      const done = { ...current, active: false, completed: 1, failed: fail ? 1 : 0,
+        replacementIds: ['event-one', 'event-two'], errors: fail ? [{ error: 'Scoring failed' }] : [] };
+      current = null;
+      res.end(JSON.stringify(done)); return;
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const env = { ...process.env, BULK_REANALYZE_PUBLIC_API_URL: base, BULK_REANALYZE_PRIVATE_API_URL: base };
+  const args = ['bulk-reanalyze.mjs', '--historical', '--start-date', '2023-05-01', '--end-date', '2023-05-02'];
+  const cwd = new URL('..', import.meta.url);
+  const preview = await execute(process.execPath, [...args, '--dry-run'], { cwd, env });
+  assert.match(preview.stdout, /WOULD RUN earlier/);
+  assert.doesNotMatch(preview.stdout, /WOULD RUN converted/);
+  assert.deepEqual(posts, []);
+  const run = await execute(process.execPath, args, { cwd, env });
+  assert.deepEqual(posts, ['earlier', 'later']);
+  assert.match(run.stdout, /2 event clip\(s\)/);
+  assert.match(run.stdout, /2 succeeded, 0 failed/);
+  posts.length = 0; fail = true;
+  await assert.rejects(execute(process.execPath, args, { cwd, env }), error => {
+    assert.match(error.stderr, /Scoring failed/);
+    assert.match(error.stderr, /1 recording\(s\) not started/);
+    return error.code === 1;
+  });
+  assert.deepEqual(posts, ['earlier']);
+});
+
 test("bulk CLI filters the requested day and serializes recordings despite legacy worker settings", async t => {
   const selected = [];
   let active = 0;

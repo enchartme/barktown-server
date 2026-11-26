@@ -426,6 +426,41 @@ analyzer running during imports.
 
 ### Bulk re-analysis by date
 
+For a one-time historical import, reuse the CLI with **`--historical`**. This
+selects only original AAC/M4A records (`reanalysisMode: "historical"`), excluding
+ordinary Goblin recordings and already-created historical event clips. Preview
+the inclusive range before processing it, for example in the private-api
+container terminal:
+
+```bash
+cd /app
+npm run bulk-reanalyze -- --historical --start-date 2023-01-01 --end-date 2023-12-31 --dry-run
+npm run bulk-reanalyze -- --historical --start-date 2023-01-01 --end-date 2023-12-31
+```
+
+The preview lists selected source records without starting work. Actual imports
+run in chronological order, **one complete source recording at a time**. A
+historical POST returns 202; the CLI polls the matching job until it completes,
+prints stages and clip counts, and only then submits the next source. There is
+no whole-batch timeout: hours-long jobs use the server/analyzer replay limits.
+Date bounds refer to source-record dates; generated clips may fall on later dates.
+Existing threshold/refractory/window/step overrides also work in historical mode;
+omit them to use current monitor settings.
+
+Historical mode stops on the first failure, reports how many sources were not
+started, and exits nonzero. A disconnected status request, replaced job, or API
+restart also stops submission because completion cannot be confirmed. Check the
+private API's `/api/reanalysis` status and wait for any active job to finish before
+rerunning the same command. Completed imports have replaced their original rows,
+so their generated clips are excluded on rerun. Sources with zero accepted events
+remain in the diary and will be selected again. There is no separate checkpoint.
+Keep the CLI terminal open for the batch; disconnecting it leaves an already
+accepted server job running but does not submit the remaining recordings.
+
+Without `--historical`, the existing selection includes all eligible recordings.
+It also waits correctly for any historical jobs encountered in that selection.
+`--dry-run` works with either selection.
+
 On the Tailnet, use **Re-analyze day** in a report card header or diary day
 label. The browser starts `POST /api/diary/reanalyze-day` on the private API.
 The job snapshots that day's recordings, skips unavailable source WAVs, and
