@@ -636,6 +636,14 @@ hit metadata. Original public files are removed afterwards; the archived source
 remains intact. The Pi runs file verification and database work, with decoding,
 model inference, MP3 encoding and waveform generation left to the workstation.
 
+Mounted buckets can cache directory listings and upload asynchronously. If a
+new archive is not visible yet, the worker reads the still-present original
+under `audio/`; the Pi verifies its SHA-256 against the archive before commit.
+If neither complete source is visible, the worker retries for up to two minutes.
+It also waits up to two minutes for staged uploads to become visible to the Pi.
+Permission errors, invalid media, checksum mismatches and changed sources still
+stop the batch. These waits retain the existing checkpoint.
+
 For a mounted bucket, pass its **bucket root** (the directory containing
 `audio/`, `waveforms/`, etc.). Preview first, then omit `--dry-run` to process:
 

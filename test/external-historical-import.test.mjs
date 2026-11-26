@@ -134,7 +134,10 @@ test('external import verifies and publishes media, preserves notes and retries 
 
 test('external import refuses missing, corrupt, misplaced and wrong-duration media without changing the diary', async t => {
   const mutations = {
-    missing: (f, body) => fs.unlinkSync(path.join(f.store, body.files[0].stagingKey)),
+    missing: (f, body) => {
+      fs.unlinkSync(path.join(f.store, body.files[0].stagingKey));
+      fs.writeFileSync(path.join(f.store, 'fail-source-read'), '1');
+    },
     corrupt: (f, body) => fs.writeFileSync(path.join(f.store, body.files[0].stagingKey), 'different bytes!'),
     misplaced: (_f, body) => { body.files[0].key = 'audio/2099/wrong.wav'; },
     settings: (_f, body) => { body.payload.analysis_settings.monitor.candidate_threshold = .01; },
@@ -263,4 +266,35 @@ test('Mac CLI recovers a lost commit response without rescoring or duplicating e
   assert.match(resumed.stdout, /1 historical source\(s\) committed/);
   assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), 'scored\n');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM diary_entries').get().count, 1);
+});
+
+test('Mac CLI processes the full queue despite an invisible archive and delayed staged uploads', async t => {
+  const f = await setup(t);
+  f.seed('2023-05-30 12-00-00 first.m4a'); f.seed();
+  let pending = true;
+  const proxy = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    if (req.url.endsWith('/commit') && pending) {
+      pending = false;
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Missing or incomplete staged file: historical-import-staging/pending.wav' }));
+      return;
+    }
+    const response = await fetch(f.privateUrl() + req.url, { method: req.method,
+      ...(req.method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: Buffer.concat(chunks) } : {}) });
+    res.writeHead(response.status, { 'Content-Type': 'application/json' }); res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { proxy.closeAllConnections(); proxy.close(resolve); }));
+  const args = ['historical-worker.mjs', '--start-date', '2023-05-30', '--end-date', '2023-05-31',
+    '--api-base', `http://127.0.0.1:${proxy.address().port}`, '--public-api-base', f.publicApi.baseUrl,
+    '--state-file', path.join(f.tmp, 'checkpoint.json'), '--bucket-root', f.store];
+  const delay = new URL('./fixtures/historical-mount-delay.mjs', import.meta.url).pathname;
+  const result = await execute(process.execPath, args, { cwd: new URL('..', import.meta.url),
+    env: { ...process.env, ...f.env, NODE_OPTIONS: `${f.env.NODE_OPTIONS} --import=${delay}` } });
+  assert.equal((result.stdout.match(/archive not visible in mount/g) ?? []).length, 2);
+  assert.match(result.stdout, /Waiting for mounted uploads to reach the Pi/);
+  assert.match(result.stdout, /2 historical source\(s\) committed/);
+  assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), 'scored\nscored\n');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.tmp, 'checkpoint.json'))).completed.length, 2);
 });

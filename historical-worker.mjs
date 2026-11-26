@@ -16,6 +16,7 @@ import { runAudioCommand } from './lib/audio.mjs';
 import { runReanalyzeScript } from './lib/reanalyze.mjs';
 import { planHistoricalClips } from './lib/historical-recordings.mjs';
 import { decodeHistoricalSource, createHistoricalClipMedia, historicalStagingFiles } from './lib/historical-media.mjs';
+import { mountedObjectPath as mountPath, copyMountedHistoricalSource, commitWhenStagedFilesVisible } from './lib/historical-worker-files.mjs';
 
 loadEnv(import.meta.url);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -90,15 +91,6 @@ function parseArgs(args) {
   if (options.bucketRoot) options.bucketRoot = path.resolve(options.bucketRoot);
   return { ...options, selection };
 }
-function mountPath(bucketRoot, key) {
-  if (typeof key !== 'string' || key.includes('\\') || key.split('/').some(part => !part || part === '.' || part === '..')) {
-    throw new Error('Invalid bucket-relative path');
-  }
-  const file = path.resolve(bucketRoot, key);
-  if (!file.startsWith(bucketRoot + path.sep)) throw new Error('Object path escaped the bucket mount');
-  return file;
-}
-
 async function main() {
   if (process.argv.includes('--help')) {
     console.log(`Usage: npm run historical-worker -- YYYY-MM-DD [options]
@@ -200,8 +192,11 @@ Rerun the same command and state file to resume.`);
         let analysis = await readJson(path.join(work, 'analysis.json'));
         if (!analysis) {
           console.log(`READ  ${ticket.archiveKey}`);
-          if (bucketRoot) await fs.copyFile(mountPath(bucketRoot, ticket.archiveKey), input);
-          else await download(mc, cfg.bucket, ticket.archiveKey, input);
+          if (bucketRoot) {
+            const readKey = await copyMountedHistoricalSource({ bucketRoot, ticket, destination: input,
+              onWait: message => console.log(`WAIT  ${message}`) });
+            if (readKey !== ticket.archiveKey) console.log(`READ  ${readKey} — archive not visible in mount; Pi will verify its checksum`);
+          } else await download(mc, cfg.bucket, ticket.archiveKey, input);
           const sourceSha256 = await hashFile(input);
           console.log('DECODE on Mac');
           const durationSec = await decodeHistoricalSource(cfg, input, wav);
@@ -236,9 +231,12 @@ Rerun the same command and state file to resume.`);
         await writeJson(path.join(work, 'manifest.json'), manifest);
       }
       console.log('VERIFY and COMMIT on Pi');
-      const result = manifest ? await requestJson(`${apiBase}/api/historical-imports/${id}/commit`, {
+      const commit = () => requestJson(`${apiBase}/api/historical-imports/${id}/commit`, {
         body: manifest, timeoutMs: cfg.reanalyze.replayTimeoutMs,
-      }) : ticket.result;
+      });
+      const result = !manifest ? ticket.result : bucketRoot
+        ? await commitWhenStagedFilesVisible(commit, { onWait: message => console.log(`WAIT  ${message}`) })
+        : await commit();
       state.completed.push(entry.id); state.current = null;
       await writeJson(stateFile, state);
       console.log(`OK    ${entry.id} — ${result.replacementIds.length} event clip(s)`);

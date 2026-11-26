@@ -47,6 +47,9 @@ Client.prototype.fPutObject = async function (_bucket, key, source) {
 };
 Client.prototype.removeObject = async function (_bucket, key) { fs.rmSync(location(key), { force: true }); };
 Client.prototype.getObject = async function (_bucket, key) {
+  if (key.startsWith('historical-recordings-archive/') && fs.existsSync(path.join(root, 'fail-source-read'))) {
+    throw new Error('The source should not be hashed while staged uploads are missing');
+  }
   if (!fs.existsSync(location(key))) throw Object.assign(new Error('not found'), { code: 'NoSuchKey' });
   return fs.createReadStream(location(key));
 };
