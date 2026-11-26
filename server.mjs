@@ -1077,13 +1077,13 @@ async function reanalyzeDiary(req, reply) {
   }
   const tuning = req.reanalysisTuning ?? resolveReanalyzeTuning(req.body);
   const historical = isHistoricalRecording(entry, CFG);
-  const workers = historical ? 1 : reanalyzeWorkersForRequest(req);
+  const workers = reanalyzeWorkersForRequest(req);
 
   try {
     return await reanalysisLimiter.run(entry.id, async () => {
       if (historical) {
         try {
-          const result = await importHistoricalRecording({ entry, cfg: CFG, db, mc,
+          const result = await importHistoricalRecording({ entry, cfg: CFG, db, mc, workers,
             stat: statObjectIfExists, tuning: { monitorSettings: tuning.replayMonitorSettings },
             validate: payload => validateHitMetadataPayload(payload, { requireProvenance: true }),
             warn, progress: details => reanalysisJobs.progress(entry.id, details),

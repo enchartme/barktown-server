@@ -361,7 +361,9 @@ no archived WAV is required. This path:
    `historical-recordings-archive/YYYY/MM/<original filename>` in the same bucket.
    A retry reuses an identical archived original and refuses a conflicting one.
 2. Decodes to a temporary 16 kHz mono PCM WAV and replays trailing inference windows
-   through Goblin's actual `BarkEventAssembler`, in recording order. Settings are
+   through Goblin's actual `BarkEventAssembler`, in recording order. Window scoring
+   uses the configured per-job worker count, with worker-local classifiers and a
+   bounded queue; event assembly stays sequential. Settings are
    frozen at job start: confidence, refractory, confirmation hits and window,
    silence gap, cooldown, maximum clip length, padding, and upload gates. Upload
    cooldown uses elapsed recording time. Confirmed events are flushed at EOF;
@@ -416,7 +418,7 @@ deliberately overwritten; collisions fail the import.
 Deploy **Goblin analyzer first, then server and UI**. Restart a writable server
 process (private API or ingest) before the public API so the automatic recording-origin
 migration runs first. No recording-Pi update is needed. The server image already includes ffmpeg,
-ffprobe and audiowaveform. Inference keeps one trailing window in RAM; the decoded
+ffprobe and audiowaveform. Inference queues at most two trailing windows per worker in RAM; the decoded
 source lives on temporary disk. The default replay upload cap is 1 GiB (about nine
 hours of 16 kHz mono PCM), and the analyzer processing timeout is 24 hours. Raise
 `ANALYZER_REPLAY_MAX_UPLOAD_BYTES` and `ANALYZER_REPLAY_TIMEOUT_S` on Goblin, and
@@ -536,13 +538,15 @@ recordings within the private API worker-slot budget. With the HTTP
 analyzer, each file uses the server's configured per-job worker count. Local
 subprocess bulk mode retains one worker per file.
 
-By default, re-analysis runs one worker at a time. `REANALYZE_CONCURRENCY`
+The Compose deployment defaults to three workers per file for both individual and
+bulk re-analysis, including historical replay, within a shared three-slot budget.
+Explicit environment overrides still apply. `REANALYZE_CONCURRENCY`
 controls how many worker slots may be active across all requests.
 `REANALYZE_WORKERS_PER_JOB` limits the workers for one interactive diary or
-training re-analysis and never exceeds the shared budget. Bulk requests use
+training re-analysis or historical replay and never exceeds the shared budget. Bulk requests use
 the configured per-job workers with the HTTP service (one worker in legacy
-local bulk mode). Each worker loads its own models; keep both settings
-at `1` on the Pi unless parallel runs have been tested.
+local bulk mode). Outside Compose both settings default to `1`. Each worker loads
+its own models; lower the settings together to reduce CPU and model memory use.
 
 For the standalone analyzer image and one-time Dokploy setup, see
 [the deployment guide](deploy/README.md#re-analyze-independently-deployed-goblin-service).

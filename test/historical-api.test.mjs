@@ -49,6 +49,7 @@ test('historical UI request archives, replays and publishes clips; upload failur
     for await (const _chunk of req) { /* consume uploaded source */ }
     received++;
     assert.equal(req.headers['x-barktown-analysis-mode'], 'replay');
+    assert.equal(req.headers['x-barktown-workers'], '3');
     const settings = JSON.parse(req.headers['x-barktown-monitor-settings']);
     assert.equal(settings.silence_gap_s, 120);
     assert.equal(settings.confirmation_hits, 4);
@@ -69,7 +70,8 @@ test('historical UI request archives, replays and publishes clips; upload failur
   const env = { NODE_OPTIONS: `--import=${new URL('./fixtures/historical-minio.mjs', import.meta.url).pathname}`,
     HISTORICAL_TEST_STORE: store, HISTORICAL_TEST_LOG: path.join(tmp, 'commands.jsonl'),
     FFMPEG_BIN: binary, FFPROBE_BIN: binary, AUDIOWAVEFORM_BIN: binary,
-    REANALYZE_URL: `http://127.0.0.1:${analyzer.address().port}` };
+    REANALYZE_URL: `http://127.0.0.1:${analyzer.address().port}`,
+    REANALYZE_CONCURRENCY: '3', REANALYZE_WORKERS_PER_JOB: '3' };
   const privateApi = await startTestServer({ dbPath, mode: 'private', env }); t.after(() => privateApi.stop());
   const publicApi = await startTestServer({ dbPath, mode: 'public', env }); t.after(() => publicApi.stop());
   const post = id => fetch(`${privateApi.baseUrl}/api/diary/${id}/reanalyze`, { method: 'POST' });
@@ -150,4 +152,17 @@ test('historical UI request archives, replays and publishes clips; upload failur
   assert.match(empty.message, /No confirmed events/);
   assert.ok(getDiaryEntry(db, failed.id));
   assert.ok(fs.existsSync(path.join(store, failed.waveformPath)), 'zero-event imports retain the original waveform for review');
+
+  seed('2023-05-29 12-00-00 first.aac');
+  seed('2023-05-29 15-00-00 second.m4a');
+  const beforeBulk = received;
+  const bulk = await fetch(`${privateApi.baseUrl}/api/diary/reanalyze-day`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date: '2023-05-29' }),
+  });
+  assert.equal(bulk.status, 202);
+  const bulkDone = await until(status, s => !s.active);
+  assert.equal(bulkDone.failed, 0, JSON.stringify(bulkDone.errors));
+  assert.equal(bulkDone.completed, 2);
+  assert.equal(received - beforeBulk, 2, 'each historical bulk recording requests three workers');
 });

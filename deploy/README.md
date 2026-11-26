@@ -92,8 +92,11 @@ One-time setup (both applications must run on the same Dokploy host):
    settings. Remove obsolete `BARKTOWN_GOBLIN_DIR`, `REANALYZE_PYTHON_BIN`,
    `REANALYZE_SCRIPT_PATH` and `REANALYZE_MODEL_DIR` settings if present.
    The Compose defaults already set `REANALYZE_URL=http://barktown-analyzer:8080`
-   and `REANALYZE_TIMEOUT_MS=330000`. For one three-worker job, set `REANALYZE_CONCURRENCY=3` and
-   `REANALYZE_WORKERS_PER_JOB=3`. The analyzer defaults to a three-worker cap;
+   and `REANALYZE_TIMEOUT_MS=330000`, plus `REANALYZE_CONCURRENCY=3` and
+   `REANALYZE_WORKERS_PER_JOB=3`. These defaults use three workers for both individual
+   and bulk jobs, including historical replay. Remove older explicit `1` overrides
+   or update them to `3` to use the new defaults. Deploy Goblin's parallel-replay
+   support before deploying the server. The analyzer defaults to a three-worker cap;
    raise `ANALYZER_MAX_WORKERS` in its Environment if needed.
 5. **Deploy Barktown-server once.** Its private API joins the existing analyzer
    network; public API and ingest do not. Compose retains the healthy private-API
