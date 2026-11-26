@@ -3,6 +3,8 @@
  * Reconcile active training samples and diary records by their deterministic,
  * second-precision local timestamp. The only stored relationship is
  * samples.diary_id; the diary -> sample direction is derived from that field.
+ * Also reconcile sample-backed diary audio/waveform references with the current
+ * sample paths, without modifying independent diary encodings or MinIO objects.
  *
  * Dry run (default): npm run repair-sample-diary-links
  * Apply:             npm run repair-sample-diary-links -- --apply
@@ -21,11 +23,11 @@ function usage() {
   return [
     "Usage: node repair-sample-diary-links.mjs [--apply] [--db PATH]",
     "",
-    "Audit diary/sample links in both directions by exact local timestamp.",
+    "Audit diary/sample links and sample-backed diary asset references.",
     "Without --apply, the database is opened read-only and no rows are changed.",
     "",
     "Options:",
-    "  --apply     Write safe, unambiguous repairs to samples.diary_id",
+    "  --apply     Write safe link and diary audio/waveform reference repairs",
     "  --db PATH   Override DB_PATH for this run",
     "  --help      Show this help",
   ].join("\n");
@@ -51,13 +53,15 @@ function parseArgs(args) {
 function readRows(db) {
   return {
     diaries: db.prepare(`
-      SELECT id, datetime_local AS datetimeLocal, kind
+      SELECT id, datetime_local AS datetimeLocal, kind,
+             audio_path AS audioPath, waveform_path AS waveformPath
       FROM diary_entries
       WHERE kind = 'audio'
       ORDER BY datetime_local ASC, id ASC
     `).all(),
     samples: db.prepare(`
-      SELECT id, diary_id AS diaryId, datetime_local AS datetimeLocal, status
+      SELECT id, diary_id AS diaryId, datetime_local AS datetimeLocal, status,
+             audio_path AS audioPath, waveform_path AS waveformPath
       FROM samples
       ORDER BY datetime_local ASC, id ASC
     `).all(),
@@ -79,6 +83,14 @@ function printAudit(audit) {
 
   printSection("Safe same-timestamp repairs", audit.repairableLinks, (row) => (
     `${row.timestamp}  sample ${row.sampleId}: ${row.previousDiaryId ?? "(none)"} -> diary ${row.diaryId} [${row.reason}]`
+  ));
+  printSection("Safe diary asset reference repairs", audit.repairableAssets, (row) => (
+    `${row.timestamp}  diary ${row.diaryId} <- sample ${row.sampleId}\n${Object.entries(row.changes)
+      .map(([field, change]) => `    ${field}: ${JSON.stringify(change.previous)} -> ${JSON.stringify(change.next)}`)
+      .join("\n")}`
+  ));
+  printSection("Blocked asset reference repairs", audit.blockedAssetRepairs, (row) => (
+    `diary ${row.diaryId} <- sample ${row.sampleId}: ${row.reason}`
   ));
   printSection("Samples with no diary target at the same timestamp", audit.sampleMissingTargets, (row) => (
     `${row.timestamp}  sample ${row.sampleId} (current diary: ${row.currentDiaryId ?? "none"})`
@@ -131,7 +143,7 @@ if (options?.help) {
     console.log(`Sample/diary link audit: ${dbPath}`);
     console.log(options.apply ? "Mode: APPLY" : "Mode: DRY RUN (pass --apply to write repairs)");
     const initialRows = readRows(db);
-    const initialAudit = auditSampleDiaryLinks(initialRows.diaries, initialRows.samples);
+    const initialAudit = auditSampleDiaryLinks(initialRows.diaries, initialRows.samples, cfg);
     printAudit(initialAudit);
 
     if (options.apply) {
@@ -145,7 +157,7 @@ if (options?.help) {
 
       const applyRepairs = db.transaction(() => {
         const currentRows = readRows(db);
-        const currentAudit = auditSampleDiaryLinks(currentRows.diaries, currentRows.samples);
+        const currentAudit = auditSampleDiaryLinks(currentRows.diaries, currentRows.samples, cfg);
         const now = new Date().toISOString();
         for (const repair of currentAudit.repairableLinks) {
           const result = update.run({
@@ -158,20 +170,37 @@ if (options?.help) {
             throw new Error(`sample changed during repair: ${repair.sampleId}`);
           }
         }
-        return currentAudit.repairableLinks;
+        const columns = { audioPath: "audio_path", waveformPath: "waveform_path" };
+        for (const repair of currentAudit.repairableAssets) {
+          for (const [field, change] of Object.entries(repair.changes)) {
+            const column = columns[field];
+            const result = db.prepare(`
+              UPDATE diary_entries SET ${column} = @next, updated_at = @now
+              WHERE id = @diaryId AND ${column} IS @previous
+            `).run({ ...change, diaryId: repair.diaryId, now });
+            if (result.changes !== 1) {
+              throw new Error(`diary changed during asset repair: ${repair.diaryId}`);
+            }
+          }
+        }
+        return currentAudit;
       });
 
       const applied = applyRepairs.immediate();
-      console.log(`\nApplied ${applied.length} link repair(s).`);
-      for (const repair of applied) {
+      console.log(`\nApplied ${applied.repairableLinks.length} link repair(s).`);
+      for (const repair of applied.repairableLinks) {
         console.log(`  ${repair.sampleId} -> ${repair.diaryId}`);
       }
 
+      console.log(`Applied ${applied.repairableAssets.length} diary asset reference repair(s).`);
+
       const finalRows = readRows(db);
-      const finalAudit = auditSampleDiaryLinks(finalRows.diaries, finalRows.samples);
+      const finalAudit = auditSampleDiaryLinks(finalRows.diaries, finalRows.samples, cfg);
       console.log("\nPost-apply verification:");
       console.log(`  healthy links: ${finalAudit.counts.healthyLinks}`);
       console.log(`  recoverable links remaining: ${finalAudit.counts.repairableLinks}`);
+      console.log(`  recoverable asset references remaining: ${finalAudit.counts.repairableAssets}`);
+      console.log(`  blocked asset repairs remaining: ${finalAudit.counts.blockedAssetRepairs}`);
       console.log(`  ambiguous timestamps remaining: ${finalAudit.counts.ambiguousTimestamps}`);
       console.log(`  blocked repairs remaining: ${finalAudit.counts.blockedRepairs}`);
     }

@@ -135,8 +135,24 @@ npm run repair-sample-diary-links
 npm run repair-sample-diary-links -- --apply
 ```
 
-Use `--db PATH` to inspect a specific database. Apply mode changes only safe,
-one-to-one active-sample links and verifies the result after committing.
+Use `--db PATH` to inspect a specific database. The audit also compares audio
+and waveform references for diary entries whose audio lives under
+`training-samples/`. It reports old paths left behind by sample relabeling and
+missing or stale diary waveform references, showing each proposed before/after
+value. Repairs use the current active sample metadata, including when the link
+itself needs repair in the same run.
+
+Apply mode repairs safe, one-to-one active-sample links and these diary asset
+references in one transaction, then verifies the result. Ambiguous matches and
+conflicting active links are skipped. Independent diary encodings under `audio/`
+retain their own audio and waveform paths. Diary IDs, labels, filenames, trims,
+approvals, annotations, and hit metadata are preserved. Missing sample references
+are reported instead of clearing diary references. Re-running after a repair
+makes no further changes.
+
+This is a SQLite metadata audit: it does not check whether MinIO objects exist,
+move files, or regenerate waveforms. Its replacement paths come from the sample
+rows; it does not infer filenames or guess object keys.
 
 Pending guarded one-time operations live under `migrations/`; completed
 operations and their tests are retained under `archive/`. The current

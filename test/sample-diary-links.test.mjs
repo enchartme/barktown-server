@@ -144,13 +144,15 @@ test("CLI is read-only by default and applies the audited link on request", () =
       CREATE TABLE diary_entries (
         id TEXT PRIMARY KEY,
         datetime_local TEXT NOT NULL,
-        kind TEXT NOT NULL
+        kind TEXT NOT NULL,
+        audio_path TEXT, waveform_path TEXT, updated_at TEXT
       );
       CREATE TABLE samples (
         id TEXT PRIMARY KEY,
         diary_id TEXT,
         datetime_local TEXT NOT NULL,
         status TEXT NOT NULL,
+        audio_path TEXT, waveform_path TEXT,
         updated_at TEXT NOT NULL
       );
     `);
@@ -183,6 +185,128 @@ test("CLI is read-only by default and applies the audited link on request", () =
       db.prepare("SELECT diary_id FROM samples WHERE id = ?").get("sample-1").diary_id,
       "diary-1",
     );
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+const timestamp = "2026-06-17T18:58:28";
+const oldAudio = "training-samples/bark/2026-06-17 18-58-28 SAMPLE bark.wav";
+const newAudio = "training-samples/yap/2026-06-17 18-58-28 SAMPLE yap.wav";
+const oldWave = "training-samples-waveforms/bark/old.json";
+const newWave = "training-samples-waveforms/yap/new.json";
+const assetDiary = (overrides = {}) => ({
+  ...diary("diary", timestamp), audioPath: oldAudio, waveformPath: oldWave, ...overrides,
+});
+const assetSample = (overrides = {}) => ({
+  ...sample("sample", timestamp, "diary"), audioPath: newAudio, waveformPath: newWave, ...overrides,
+});
+
+test("asset audit repairs stale paths and missing waveforms on healthy and recoverable links", () => {
+  for (const diaryId of ["diary", null, "missing-diary"]) {
+    for (const waveformPath of [oldWave, null]) {
+      const audit = auditSampleDiaryLinks([assetDiary({ waveformPath })], [assetSample({ diaryId })]);
+      assert.equal(audit.repairableAssets.length, 1);
+      assert.deepEqual(audit.repairableAssets[0].changes, {
+        audioPath: { previous: oldAudio, next: newAudio },
+        waveformPath: { previous: waveformPath, next: newWave },
+      });
+    }
+  }
+  const waveformOnly = auditSampleDiaryLinks(
+    [assetDiary({ audioPath: newAudio, waveformPath: null })], [assetSample()],
+  );
+  assert.deepEqual(Object.keys(waveformOnly.repairableAssets[0].changes), ["waveformPath"]);
+});
+
+test("asset audit preserves independent encodings and skips ambiguous or inactive samples", () => {
+  const cases = [
+    [[assetDiary({ audioPath: "audio/2026/06/recording.mp3", waveformPath: null })], [assetSample()]],
+    [[assetDiary()], [assetSample(), assetSample({ id: "duplicate" })]],
+    [[assetDiary(), assetDiary({ id: "duplicate" })], [assetSample()]],
+    [[assetDiary()], [assetSample({ status: "deleted" })]],
+    [[assetDiary()], [assetSample({ diaryId: null }), assetSample({ id: "stray", datetimeLocal: "2026-06-18T12:00:00" })]],
+  ];
+  for (const [diaries, samples] of cases) {
+    assert.equal(auditSampleDiaryLinks(diaries, samples).repairableAssets.length, 0);
+  }
+  const occupied = auditSampleDiaryLinks([assetDiary()], [
+    assetSample(), assetSample({ id: "stray", datetimeLocal: "2026-06-18T12:00:00" }),
+  ]);
+  assert.equal(occupied.repairableAssets.length, 0);
+  assert.equal(occupied.blockedAssetRepairs.length, 1);
+});
+
+test("asset audit reports unavailable replacements without erasing references", () => {
+  const audit = auditSampleDiaryLinks([assetDiary()], [assetSample({ waveformPath: null })]);
+  assert.equal(audit.blockedAssetRepairs.length, 1);
+  assert.equal(audit.blockedAssetRepairs[0].field, "waveformPath");
+  assert.deepEqual(Object.keys(audit.repairableAssets[0].changes), ["audioPath"]);
+});
+
+test("CLI repairs stale and missing asset references atomically with links and is idempotent", async () => {
+  const { openDb, upsertDiaryEntry, upsertSample } = await import("../lib/db.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-asset-repair-"));
+  const dbPath = path.join(directory, "assets.db");
+  const db = openDb(dbPath);
+  const run = (...args) => spawnSync(process.execPath,
+    ["repair-sample-diary-links.mjs", "--db", dbPath, ...args],
+    { cwd: REPO_ROOT, encoding: "utf8" });
+  try {
+    for (const [id, audioPath, waveformPath] of [
+      ["renamed", oldAudio, oldWave],
+      ["missing-wave", newAudio, null],
+      ["independent", "audio/2026/06/independent.mp3", "waveforms/2026/06/independent.json"],
+    ]) {
+      const dt = id === "renamed" ? timestamp : id === "missing-wave" ? "2026-06-28T08:16:29" : "2026-07-01T12:00:00";
+      upsertDiaryEntry(db, {
+        id, filename: `${id}.wav`, audioPath, waveformPath, label: "historical label",
+        datetimeLocal: dt, date: dt.slice(0, 10), time: dt.slice(11, 16), durationSec: 30,
+        trimStartMs: 1000, trimStopMs: 24000, kind: "audio",
+      });
+      upsertSample(db, {
+        id: `sample-${id}`, diaryId: id === "renamed" ? null : id,
+        filename: `${id} SAMPLE yap.wav`, audioPath: newAudio, waveformPath: newWave,
+        label: "yap", datetimeLocal: dt, date: dt.slice(0, 10), durationSec: 30,
+      });
+    }
+    db.prepare("UPDATE diary_entries SET approved = '2026-11-01T12:00:00Z'").run();
+    const rows = () => db.prepare("SELECT * FROM diary_entries ORDER BY id").all();
+    const before = rows();
+    const dry = run();
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /Safe diary asset reference repairs: 2/);
+    assert.match(dry.stdout, /audioPath:.*bark.*->.*yap/);
+    assert.match(dry.stdout, /waveformPath: null ->/);
+    assert.deepEqual(rows(), before);
+    assert.equal(db.prepare("SELECT diary_id FROM samples WHERE id = 'sample-renamed'").get().diary_id, null);
+
+    db.exec(`CREATE TRIGGER fail_waveform_repair BEFORE UPDATE OF waveform_path ON diary_entries
+      WHEN NEW.id = 'renamed' BEGIN SELECT RAISE(ABORT, 'test failure'); END`);
+    const failed = run("--apply");
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /test failure/);
+    assert.deepEqual(rows(), before);
+    assert.equal(db.prepare("SELECT diary_id FROM samples WHERE id = 'sample-renamed'").get().diary_id, null);
+    db.exec("DROP TRIGGER fail_waveform_repair");
+
+    const applied = run("--apply");
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.match(applied.stdout, /Applied 1 link repair\(s\)/);
+    assert.match(applied.stdout, /Applied 2 diary asset reference repair\(s\)/);
+    assert.match(applied.stdout, /recoverable asset references remaining: 0/);
+    for (const row of rows()) {
+      const previous = before.find(old => old.id === row.id);
+      if (row.id === "independent") assert.deepEqual(row, previous);
+      else assert.deepEqual(row, { ...previous, audio_path: newAudio, waveform_path: newWave, updated_at: row.updated_at });
+    }
+    assert.equal(db.prepare("SELECT diary_id FROM samples WHERE id = 'sample-renamed'").get().diary_id, "renamed");
+    const after = rows();
+    const second = run("--apply");
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(second.stdout, /Applied 0 diary asset reference repair\(s\)/);
+    assert.deepEqual(rows(), after);
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
