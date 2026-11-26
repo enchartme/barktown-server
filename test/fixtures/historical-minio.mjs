@@ -23,7 +23,10 @@ Client.prototype.fGetObject = async function (_bucket, key, destination) {
   fs.copyFileSync(location(key), destination);
 };
 Client.prototype.fPutObject = async function (_bucket, key, source) {
-  if (fs.existsSync(path.join(root, 'fail-upload')) && key.endsWith('.mp3')) throw new Error('Simulated upload failure');
+  if (fs.existsSync(path.join(root, 'fail-upload')) && key.endsWith('.mp3')) {
+    const target = fs.readFileSync(path.join(root, 'fail-upload'), 'utf8').trim();
+    if (target === '1' || target === key) throw new Error('Simulated upload failure');
+  }
   fs.mkdirSync(path.dirname(location(key)), { recursive: true });
   fs.copyFileSync(source, location(key));
 };

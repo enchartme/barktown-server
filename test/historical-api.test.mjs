@@ -26,9 +26,12 @@ test('historical UI request archives, replays and publishes clips; upload failur
   t.after(() => { db.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
   function seed(filename) {
     const entry = { ...parseFilename(filename), filename, audioPath: `audio/2023/05/${filename}`, durationSec: 7200, kind: 'audio' };
+    entry.waveformPath = `waveforms/2023/05/${entry.id}.json`;
     upsertDiaryEntry(db, entry);
     fs.mkdirSync(path.dirname(path.join(store, entry.audioPath)), { recursive: true });
     fs.writeFileSync(path.join(store, entry.audioPath), 'original compressed audio');
+    fs.mkdirSync(path.dirname(path.join(store, entry.waveformPath)), { recursive: true });
+    fs.writeFileSync(path.join(store, entry.waveformPath), JSON.stringify({ data: [-100, 100], original: true }));
     return entry;
   }
   const first = seed('2023-05-31 23-59-00 barks at car.aac');
@@ -53,10 +56,13 @@ test('historical UI request archives, replays and publishes clips; upload failur
     if (received === 1) await new Promise(resolve => { release = resolve; });
     res.setHeader('Content-Type', 'application/json');
     if (failAnalysis) { res.writeHead(502); res.end(JSON.stringify({ error: 'Scoring failed' })); return; }
-    res.end(JSON.stringify({ timestamps: noEvents ? [] : [61.5, 63], confidences: noEvents ? [] : [.95, .96], loudnesses: noEvents ? [] : [1, 2],
+    res.end(JSON.stringify({ timestamps: noEvents ? [] : [61.5, 63, 100, 101.5], confidences: noEvents ? [] : [.95, .96, .97, .98], loudnesses: noEvents ? [] : [1, 2, 3, 4],
       padding_s: 0, window_s: 1.5, model_trained_at: null, analysis_trigger: 'manual',
       analysis_settings: { classifier: {}, monitor: settings, analysis_mode: 'historical_stream_replay',
-        events: noEvents ? [] : [{ start_ts: 61.5, end_ts: 63, hit_start_index: 0, hit_stop_index: 2 }] } }));
+        events: noEvents ? [] : [
+          { start_ts: 61.5, end_ts: 63, hit_start_index: 0, hit_stop_index: 2 },
+          { start_ts: 100, end_ts: 101.5, hit_start_index: 2, hit_stop_index: 4 },
+        ] } }));
   });
   await new Promise(resolve => analyzer.listen(0, '127.0.0.1', resolve));
   t.after(() => { analyzer.closeAllConnections(); analyzer.close(); });
@@ -75,11 +81,12 @@ test('historical UI request archives, replays and publishes clips; upload failur
   await until(() => received, n => n === 1);
   assert.ok(fs.existsSync(path.join(store, first.audioPath.replace('audio/', 'historical-recordings-archive/'))));
   assert.ok(getDiaryEntry(db, first.id), 'original remains visible until publication');
+  assert.ok(fs.existsSync(path.join(store, first.waveformPath)), 'original waveform remains available during inference');
   assert.equal((await post(first.id)).status, 409);
   release();
   const done = await until(status, s => !s.active);
   assert.equal(done.failed, 0, JSON.stringify(done.errors));
-  assert.equal(done.replacementIds.length, 1);
+  assert.equal(done.replacementIds.length, 2);
   assert.deepEqual(done.replacementDates, ['2023-06-01']);
   const clip = getDiaryEntry(db, done.replacementIds[0]);
   assert.equal(clip.datetimeLocal, '2023-06-01T00:00:00');
@@ -102,30 +109,45 @@ test('historical UI request archives, replays and publishes clips; upload failur
   assert.deepEqual(fallback.find(e => e.id === clip.id).sourceRecording, sourceRecording);
   assert.ok(fs.existsSync(path.join(store, clip.audioPath)));
   assert.ok(fs.existsSync(path.join(store, clip.sourceWavPath)));
+  for (const id of done.replacementIds) {
+    const event = getDiaryEntry(db, id);
+    assert.notEqual(event.waveformPath, first.waveformPath);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store, event.waveformPath), 'utf8')), { data: [0, 1] },
+      'each clip publishes a newly generated waveform');
+    assert.equal(fallback.find(e => e.id === id).waveformPath, event.waveformPath);
+  }
   assert.equal(fs.existsSync(path.join(store, first.audioPath)), false);
+  assert.equal(fs.existsSync(path.join(store, first.waveformPath)), false, 'old full-recording waveform is deleted after publication');
+  assert.equal(fallback.some(e => e.waveformPath === first.waveformPath), false);
   assert.equal(getDiaryEntry(db, first.id), undefined);
   const commands = fs.readFileSync(env.HISTORICAL_TEST_LOG, 'utf8').trim().split('\n').map(JSON.parse);
   const mp3 = commands.find(args => args.includes('libmp3lame'));
   assert.ok(mp3.includes('title=barks at car'));
   assert.ok(mp3.includes('comment=Recorded: 2023-06-01T00:00:00 local time  Listen: https://barktown.enchart.me/#2023-06-01_00-00-00_-A-  Source: 2023-05-31 23-59-00 barks at car.aac'));
   const failed = seed('2023-05-30 12-00-00 test.m4a');
-  fs.writeFileSync(path.join(store, 'fail-upload'), '1');
+  // Fail the second clip after the first clip's waveform has been published.
+  fs.writeFileSync(path.join(store, 'fail-upload'), 'audio/2023/05/2023-05-30 12-01-38 -A-.mp3');
   assert.equal((await post(failed.id)).status, 202);
   const failedJob = await until(status, s => !s.active);
   assert.equal(failedJob.failed, 1);
   assert.match(failedJob.errors[0].error, /Simulated upload failure/);
   assert.ok(getDiaryEntry(db, failed.id));
   assert.ok(fs.existsSync(path.join(store, failed.audioPath)));
+  assert.ok(fs.existsSync(path.join(store, failed.waveformPath)), 'failed imports retain the original waveform');
   assert.equal(fs.existsSync(path.join(store, 'uncompressed-uploads-archive/2023/05/2023-05-30 12-01-00 -A-.wav')), false);
+  assert.equal(fs.existsSync(path.join(store, 'waveforms/2023/05/2023-05-30_12-01-00_-A-.json')), false,
+    'rollback removes the already published first clip waveform');
   fs.rmSync(path.join(store, 'fail-upload'));
   failAnalysis = true;
   assert.equal((await post(failed.id)).status, 202);
   assert.equal((await until(status, s => !s.active)).failed, 1);
   assert.ok(getDiaryEntry(db, failed.id));
+  assert.ok(fs.existsSync(path.join(store, failed.waveformPath)), 'inference failure retains the original waveform');
   failAnalysis = false; noEvents = true;
   assert.equal((await post(failed.id)).status, 202);
   const empty = await until(status, s => !s.active);
   assert.equal(empty.failed, 0);
   assert.match(empty.message, /No confirmed events/);
   assert.ok(getDiaryEntry(db, failed.id));
+  assert.ok(fs.existsSync(path.join(store, failed.waveformPath)), 'zero-event imports retain the original waveform for review');
 });
