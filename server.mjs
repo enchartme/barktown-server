@@ -60,6 +60,7 @@ import {
   getAnnotation, insertAnnotation, updateAnnotation, applyAnnotationWindowReview,
   deleteAnnotationRow, replaceSampleAnalysisFragments,
   listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
+  autoApproveDay, listApprovalEvents,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
   upsertDataQuality, getDataQuality, listDataQualityPage, deleteDataQualityRow, moveDataQualityRecord,
@@ -867,7 +868,7 @@ privateApi.patch("/api/diary/:id/trim", async (req, reply) => {
   const { trimStartMs, trimStopMs } = req.body ?? {};
   if (trimStartMs === null && trimStopMs === null) {
     const updated = setDiaryTrim(db, entry.id);
-    return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs };
+    return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs, approved: updated.approved, approvalSource: updated.approvalSource };
   }
 
   const durationMs = Math.max(0, Math.round(entry.durationSec * 1000));
@@ -884,7 +885,7 @@ privateApi.patch("/api/diary/:id/trim", async (req, reply) => {
   const updated = setDiaryTrim(db, entry.id, fullRecording
     ? {}
     : { trimStartMs, trimStopMs });
-  return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs };
+  return { trimStartMs: updated.trimStartMs, trimStopMs: updated.trimStopMs, approved: updated.approved, approvalSource: updated.approvalSource };
 });
 
 // Approvals are operator review state. Store the server's current time when
@@ -902,7 +903,19 @@ privateApi.patch("/api/diary/:id/approved", async (req, reply) => {
   }
 
   const updated = setDiaryApproved(db, entry.id, req.body.approved);
-  return { approved: updated.approved };
+  return { approved: updated.approved, approvalSource: updated.approvalSource };
+});
+
+privateApi.post('/api/diary/auto-approve-day', async (req, reply) => {
+  const { date } = req.body ?? {};
+  if (!isIsoDate(date)) return reply.code(400).send({ error: 'date must be a real YYYY-MM-DD date' });
+  if (reanalysisJobs.snapshot().active) return reply.code(409).send({ error: 'Re-analysis is already in progress. Wait for it to finish.' });
+  return autoApproveDay(db, date);
+});
+
+privateApi.get('/api/diary/:id/approval-events', async (req, reply) => {
+  if (!getDiaryEntry(db, req.params.id)) return reply.code(404).send({ error: 'not found' });
+  return listApprovalEvents(db, req.params.id);
 });
 
 // Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).

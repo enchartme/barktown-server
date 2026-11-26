@@ -209,6 +209,8 @@ unlinked recordings expose the equivalent diary-scoped notes.
 | `POST /api/diary/:id/data-quality` | Upsert Goblin's timeboxed capture-integrity and XRUN facts |
 | `GET /api/reanalysis` | Current/last re-analysis job, progress counts, errors and currently processing recording IDs (private only) |
 | `POST /api/diary/reanalyze-day` | Start a detached full-day job with `{ "date": "YYYY-MM-DD" }` and optional tuning overrides; returns `202` |
+| `POST /api/diary/auto-approve-day` | Approve qualifying unapproved audio records for `{ "date": "YYYY-MM-DD" }` using saved thresholds; private only |
+| `GET /api/diary/:id/approval-events` | Approval/withdrawal history with threshold and evidence snapshots; private only |
 | `POST /api/diary/:id/reanalyze` | Reclassify the available source WAV and store the result |
 | `DELETE /api/diary/:id` | Delete a diary entry |
 | `POST /api/diary/:id/move-to-samples` | Publish a diary recording and waveform as a training sample |
@@ -231,11 +233,18 @@ Bulk hit-metadata responses contain `items`, pagination fields including
 The same navigation links are advertised in the HTTP `Link` header. Date bounds
 use the linked diary recording's `YYYY-MM-DD` date; without bounds, orphaned
 metadata that has not yet acquired a diary row is included as well.
-Each record also exposes `modelTrainedAt`, `analysisSettings`, and
+Each record also exposes `modelTrainedAt`, `analysisSettings`, nullable `analyzedAt`, and
 `analysisTrigger`. `analysisSettings` contains the classifier identity and the
 settings actually applied during that run. Existing records
 migrate with an unknown model timestamp, empty settings, and an `automatic`
 trigger.
+
+`hit_metadata.analyzed_at` is a nullable UTC timestamp exposed as `analyzedAt`.
+For new results it records when the server saves the completed analysis;
+it is not the recording timestamp or the classifier training timestamp.
+Historical rows remain NULL until replaced by a new analysis. The timestamp
+is included in approval evidence so later analysis replacements cannot change
+the historical basis of an approval.
 
 Hit metadata also supports optional per-hit multilabel diagnostics. Classifier
 submissions to `POST /api/diary/:id/hit-metadata` and offline analyzer output
@@ -646,3 +655,55 @@ On the tailnet, filtered windows remain visible in grey in the diary, report
 barcodes, and player waveform; filtered diamonds use 0.3 idle opacity and 1
 on hover. Operator waveform/day/week counts show the retained count followed
 by the number filtered out. Public views continue to hide filtered windows.
+
+### Day auto-approval and audit
+
+The Tailnet gear menu has separate **Hide barks from view** and **Auto-approve**
+tabs. Both use `GET /api/settings` and Tailnet-only `PATCH /api/settings`.
+Automatic approval settings are seeded without replacing saved values:
+
+| Key | Range | Default | Condition |
+| --- | --- | --- | --- |
+| `auto_approve_mean_loudness_min` | 1–10 | 4 | Mean loudness ≥ threshold |
+| `auto_approve_density_min` | 0–100 | 50 | Density percentage ≥ threshold |
+| `auto_approve_delta_mean_min` | 0.5–1 | 0.9 | Mean delta ≥ threshold |
+| `auto_approve_delta_sigma_max` | 0–1 | 0.1 | Population delta sigma ≤ threshold |
+
+`POST /api/diary/auto-approve-day` evaluates only currently unapproved audio
+records for the supplied local diary date. It runs synchronously in one
+transaction, freezing thresholds and evidence. Existing approvals are left
+untouched. An active re-analysis returns 409. Nothing is automatically approved
+on ingest, re-analysis, threshold changes, or page load; use the day button.
+The response includes `evaluated`, `approved`, `alreadyApproved`, `skipped`, and
+`items` containing the newly approved IDs, timestamps, and approval sources.
+
+Metrics use all detected hits inside the saved trim (start inclusive, stop
+exclusive), ignoring presentation filters. With no valid trim they use the
+full recording. Density is `count * hit_metadata.window_s / duration * 100`,
+without rounding before comparison or clamping overlapping windows to 100%.
+Delta is `max(bark, yap) - max(other canonical labels)` and sigma is the
+population standard deviation of those deltas. All four thresholds must pass.
+Missing metadata, invalid window duration, fewer than two retained hits, or
+any retained hit without loudness and both label groups leave the record
+unapproved. The sigma default is a strict starting point to tune against
+reviewed records, rather than a calibrated probability of correctness.
+
+`diary_entries.approved` remains the current UTC approval timestamp.
+`diary_entries.approval_source` is nullable (`manual` or `auto`) and is exposed
+as `approvalSource`. Historical approvals retain their original timestamp
+and unknown source (NULL). New nullable fields are never backfilled with
+invented historical provenance.
+
+`approval_events` retains approvals and withdrawals with server timestamps,
+source, and JSON evidence. Automatic approval evidence includes rule version,
+thresholds, unrounded metrics, analysis timestamp, model settings, and trim.
+Manual approvals/withdrawals also record the available analysis provenance.
+History is available through the private approval-events endpoint and is
+retained when current approval is cleared. Re-analysis clears any approval;
+a replacement hit-metadata result or changed trim clears automatic approval.
+Changing thresholds does not revoke existing approvals. Deleting the diary
+record deletes its associated history.
+
+Deploy a writable server process first so `openDb()` adds the nullable columns,
+seeds thresholds, and creates the audit table before restarting public readers
+or deploying the UI. Goblin's existing hit-metadata payload needs no change.

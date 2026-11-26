@@ -269,7 +269,7 @@ test("PATCH /api/diary/:id/trim persists millisecond bounds without changing dur
     body: JSON.stringify({ trimStartMs: 1250, trimStopMs: 6750 }),
   });
   assert.equal(update.status, 200);
-  assert.deepEqual(await update.json(), { trimStartMs: 1250, trimStopMs: 6750 });
+  assert.deepEqual(await update.json(), { trimStartMs: 1250, trimStopMs: 6750, approved: null, approvalSource: null });
 
   const publicEntry = await fetch(`${publicServer.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive`);
   const entry = await publicEntry.json();
@@ -283,7 +283,7 @@ test("PATCH /api/diary/:id/trim persists millisecond bounds without changing dur
     body: JSON.stringify({ trimStartMs: null, trimStopMs: null }),
   });
   assert.equal(reset.status, 200);
-  assert.deepEqual(await reset.json(), { trimStartMs: null, trimStopMs: null });
+  assert.deepEqual(await reset.json(), { trimStartMs: null, trimStopMs: null, approved: null, approvalSource: null });
 });
 
 test("PATCH /api/diary/:id/trim validates bounds and stays private", async () => {
@@ -332,7 +332,7 @@ test("PATCH /api/diary/:id/approved sets and clears a server timestamp", async (
     body: JSON.stringify({ approved: false }),
   });
   assert.equal(clear.status, 200);
-  assert.deepEqual(await clear.json(), { approved: null });
+  assert.deepEqual(await clear.json(), { approved: null, approvalSource: null });
 });
 
 test("PATCH /api/diary/:id/approved validates input and stays private", async () => {
@@ -873,7 +873,7 @@ test('presentation filter settings are public to read and private to update atom
   const get = await fetch(`${publicServer.baseUrl}/api/settings`);
   assert.equal(get.status, 200);
   const defaults = await get.json();
-  assert.equal(defaults.length, 24);
+  assert.equal(defaults.length, 28);
   assert.equal(defaults.find(row => row.key === 'filter_bark_min').value, 0);
   assert.equal(defaults.find(row => row.key === 'filter_bark_max').value, 1);
   assert.ok(defaults.every(row => row.description));
@@ -908,4 +908,37 @@ test('presentation filter settings are public to read and private to update atom
     filter_negative_min: 0, filter_negative_max: 1,
     filter_delta_min: -1, filter_delta_max: 1,
   })).status, 200);
+});
+
+test('day auto-approval and audit are private, use saved thresholds, and retain analysis timestamps', async () => {
+  const date = '2026-11-26';
+  const id = `${date}_auto-approve-test`;
+  upsertDiaryEntry(seedDb, { id, filename: `${id}.mp3`, audioPath: `audio/${id}.mp3`, date,
+    time: '12:00', datetimeLocal: `${date}T12:00:00`, durationSec: 8, kind: 'audio' });
+  upsertHitMetadata(seedDb, id, { timestamps: [2, 4], confidences: [1, 1], loudnesses: [4, 4], windowS: 2,
+    multilabelScores: [{ bark: 1, wind: 0 }, { bark: 1, wind: 0 }] });
+  const post = (server, body) => fetch(`${server.baseUrl}/api/diary/auto-approve-day`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal((await post(publicServer, { date })).status, 404);
+  for (const body of [{}, { date: '2026-02-30' }, { date: 42 }]) assert.equal((await post(privateServer, body)).status, 400);
+  const approve = await post(privateServer, { date });
+  assert.equal(approve.status, 200);
+  const result = await approve.json();
+  assert.equal(result.approved, 1);
+  assert.equal(result.items[0].approvalSource, 'auto');
+  const history = `/api/diary/${id}/approval-events`;
+  assert.equal((await fetch(`${publicServer.baseUrl}${history}`)).status, 404);
+  const events = await (await fetch(`${privateServer.baseUrl}${history}`)).json();
+  assert.equal(events[0].details.metrics.density, 50);
+  assert.equal(events[0].details.thresholds.auto_approve_delta_sigma_max, .1);
+  assert.equal(typeof events[0].details.analyzedAt, 'string');
+  const repeat = await (await post(privateServer, { date })).json();
+  assert.equal(repeat.approved, 0);
+  assert.equal(repeat.alreadyApproved, 1);
+  assert.equal((await fetch(`${privateServer.baseUrl}/api/diary/missing/approval-events`)).status, 404);
+  assert.equal((await fetch(`${privateServer.baseUrl}/api/settings`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_approve_density_min: 65 }),
+  })).status, 200);
+  assert.equal((await (await fetch(`${publicServer.baseUrl}/api/settings`)).json()).find(row => row.key === 'auto_approve_density_min').value, 65);
 });

@@ -58,6 +58,7 @@ test('private day job rejects duplicate and single work, publishes progress and 
   await until(async () => responses.length, n => n === 1);
   for (const [route, body] of [
     ['/api/diary/reanalyze-day', { date: '2026-11-21' }],
+    ['/api/diary/auto-approve-day', { date: '2026-11-22' }],
     ['/api/diary/b/reanalyze', {}], ['/api/samples/anything/reanalyze', {}],
   ]) assert.equal((await post(route, body)).status, 409, route);
   // Reads, unrelated private edits, and another writer (the ingestion pattern) work during scoring.
