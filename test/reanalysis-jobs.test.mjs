@@ -67,3 +67,22 @@ test('single recording jobs lock diary, sample and day work and release on error
   assert.equal(jobs.snapshot().active, false);
   await jobs.run('retry', () => {});
 });
+
+test('historical jobs detach immediately, publish stages and retain failures for polling clients', async () => {
+  const jobs = createReanalysisJobs();
+  const gate = deferred();
+  const accepted = jobs.startRecord('old-phone', () => gate.promise);
+  assert.equal(accepted.active, true);
+  assert.deepEqual(accepted.currentIds, ['old-phone']);
+  await assert.rejects(jobs.run('other', () => {}), ReanalysisBusyError);
+  jobs.progress('old-phone', { stage: 'creating clips', eventTotal: 2, eventsCompleted: 1 });
+  assert.equal(jobs.snapshot().eventsCompleted, 1);
+  gate.resolve({ replacementIds: ['new-event'] });
+  await setImmediate();
+  assert.equal(jobs.snapshot().active, false);
+  assert.deepEqual(jobs.snapshot().replacementIds, ['new-event']);
+  jobs.startRecord('bad-phone', async () => ({ error: 'decode failed' }));
+  await setImmediate();
+  assert.equal(jobs.snapshot().failed, 1);
+  assert.equal(jobs.snapshot().errors[0].error, 'decode failed');
+});

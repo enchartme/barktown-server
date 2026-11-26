@@ -53,6 +53,20 @@ test("HTTP analyzer enforces timeout", async t => {
   await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }), /timed out after 30ms/);
 });
 
+test('historical HTTP replay sends the mode and uses its independent timeout', async t => {
+  const f = await fixture(t, async (req, res) => {
+    assert.equal(req.headers['x-barktown-analysis-mode'], 'replay');
+    for await (const _chunk of req) { /* drain */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    res.end(JSON.stringify({ timestamps: [] }));
+  });
+  f.cfg.reanalyze.timeoutMs = 1;
+  f.cfg.reanalyze.replayTimeoutMs = 1000;
+  assert.deepEqual(await runReanalyzeScript(f.cfg, f.wav, { monitorSettings }, { mode: 'replay' }), { timestamps: [] });
+  f.cfg.reanalyze.replayTimeoutMs = 10;
+  await assert.rejects(runReanalyzeScript(f.cfg, f.wav, { monitorSettings }, { mode: 'replay' }), /timed out after 10ms/);
+});
+
 test("HTTP analyzer rejects invalid or excessive response bodies", async t => {
   let body = "not-json";
   const f = await fixture(t, async (req, res) => {

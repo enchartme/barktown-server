@@ -315,7 +315,7 @@ API remains read-only and does not perform schema migrations. This change
 supports the receive/read contract; the independently deployed Goblin analyzer
 emits these scores. Waveform UI rendering remains separate work.
 
-Diary responses include a live `reanalyzable` boolean. It is true only when a
+Diary responses include a live `reanalyzable` boolean. For Goblin clips, it is true when a
 source WAV currently exists in MinIO: either the diary entry's archived WAV or
 a WAV belonging to its linked training sample. New WAV ingests retain the
 archive path and ETag in SQLite; legacy normalized archive-name candidates are
@@ -333,7 +333,7 @@ Docker deployments call the independent Goblin analyzer over its private HTTP
 endpoint. See [the one-time Dokploy setup](deploy/README.md#re-analyze-independently-deployed-goblin-service).
 Goblin main auto-deploys independently after setup.
 
-Manual re-analysis is deterministic window reclassification, not replay of
+Manual re-analysis of existing Goblin clips is deterministic window reclassification, not replay of
 Goblin's callback-aligned live event state machine. It applies and records only
 `candidate_threshold`, `hit_refractory_s`, `inference_window_s`, and
 `score_interval_s`. Confirmation, silence-gap, cooldown, and event assembly do
@@ -350,6 +350,57 @@ until that job finishes. Only day jobs schedule several recordings internally,
 within the configured worker-slot budget. Other API routes and ingestion remain
 available. Each operation uses a unique temporary directory, and analyzer
 stdout/stderr are capped as well as timed out.
+
+### Historical phone and voice-recorder imports
+
+The same **Re-analyze** button accepts timestamped `.aac` and `.m4a` diary entries
+under `audio/YYYY/MM/`. Their diary response includes `reanalysisMode: "historical"`;
+no archived WAV is required. This path:
+
+1. Copies the complete original to
+   `historical-recordings-archive/YYYY/MM/<original filename>` in the same bucket.
+   A retry reuses an identical archived original and refuses a conflicting one.
+2. Decodes to a temporary 16 kHz mono PCM WAV and replays trailing inference windows
+   through Goblin's actual `BarkEventAssembler`, in recording order. Settings are
+   frozen at job start: confidence, refractory, confirmation hits and window,
+   silence gap, cooldown, maximum clip length, padding, and upload gates. Upload
+   cooldown uses elapsed recording time. Confirmed events are flushed at EOF;
+   unconfirmed candidates are discarded.
+3. Creates one `YYYY-MM-DD HH-MM-SS -A-.mp3` per accepted event, with the same volume,
+   bitrate, ID3 provenance, date, artist, album, copyright and Barktown link tags as
+   ordinary Goblin ingest. Each event has its own archived PCM WAV, waveform,
+   aligned hit metadata, classifier diagnostics, and replay provenance.
+4. Publishes every event object before atomically replacing the original diary row
+   with the new clips. New clips start unapproved. The old public audio and waveform
+   are removed afterwards; the complete original remains archived. Source filename
+   comments and diary notes are copied to each event's note.
+
+The filename timestamp means **local recording start time**. Clip timestamps add
+the elapsed offset of the first sample, including pre-event padding; clock arithmetic
+does not apply the server's timezone or a UTC conversion. Day, month, and year
+boundaries select the resulting clip's own `YYYY/MM/` directory. The exact fractional
+offset remains in provenance even though filenames have whole-second precision.
+Hit timestamps are relative to the extracted clip. The final maximum-length cap
+matches Goblin's uploader by retaining the tail.
+
+`POST /api/diary/:id/reanalyze` returns **202** immediately for these imports.
+`GET /api/reanalysis` exposes stages, event counts, errors and replacement IDs;
+the UI polls it and refreshes the diary/report when the job completes. Day jobs also
+include available historical sources. Existing Goblin/sample re-analysis keeps its
+current behavior. With no accepted events, the original diary entry and public audio
+remain available for review, with empty hit metadata. A failure retains the original
+entry and rolls back newly published event objects. Existing clip filenames are never
+deliberately overwritten; collisions fail the import.
+
+Deploy **Goblin analyzer first, then server and UI**. No recording-Pi update or database
+migration is needed for this feature. The server image already includes ffmpeg,
+ffprobe and audiowaveform. Inference keeps one trailing window in RAM; the decoded
+source lives on temporary disk. The default replay upload cap is 1 GiB (about nine
+hours of 16 kHz mono PCM), and the analyzer processing timeout is 24 hours. Raise
+`ANALYZER_REPLAY_MAX_UPLOAD_BYTES` and `ANALYZER_REPLAY_TIMEOUT_S` on Goblin, and
+`REANALYZE_REPLAY_TIMEOUT_MS` on the server for larger jobs. Long HTTP replay avoids
+fetch's response-header deadline. Jobs are process-local: keep the private API and
+analyzer running during imports.
 
 ### Bulk re-analysis by date
 

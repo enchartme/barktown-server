@@ -41,13 +41,14 @@ import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload, listObjects } from "./lib/minio.mjs";
 import { canonicalizeAutoDetectionId, parseSampleFilename } from "./lib/filenames.mjs";
 import {
-  availableSourceWavPath,
   buildDiarySampleMove,
   existingDiarySampleConflict,
   sourceWavKeyCandidatesForEntry,
 } from "./lib/diary-samples.mjs";
 import { createReanalysisJobs, ReanalysisBusyError } from "./lib/reanalysis-jobs.mjs";
 import { runReanalyzeScript } from "./lib/reanalyze.mjs";
+import { availableRecordingSource, isHistoricalRecording } from './lib/historical-recordings.mjs';
+import { importHistoricalRecording } from './lib/historical-import.mjs';
 import { validateMultilabelScores } from "./lib/hit-metadata.mjs";
 import { trimBoundsAroundHits } from "./lib/diary-trim.mjs";
 import {
@@ -525,7 +526,10 @@ function resolveReanalyzeTuning(body) {
   for (const [bodyField, { paramId }] of Object.entries(REANALYZE_TUNING_FIELDS)) {
     monitorSettings[paramId] = body?.[bodyField] ?? monitorParams[paramId];
   }
-  return { monitorSettings };
+  const replayNames = ['confirmation_hits', 'confirmation_window_s', 'silence_gap_s', 'cooldown_s',
+    'max_clip_s', 'padding_s', 'upload_min_score', 'upload_cooldown_s'];
+  return { monitorSettings, replayMonitorSettings: { ...monitorSettings,
+    ...Object.fromEntries(replayNames.map(name => [name, monitorParams[name]])) } };
 }
 
 /** Stat an object, returning null only for a genuine not-found response. */
@@ -575,9 +579,10 @@ async function ensureSampleWaveform({ sourceWaveformKey, audioKey, waveformKey, 
 
 /** Add a live reanalyzable indication without exposing internal MinIO paths. */
 function publicDiaryEntry(entry, availableKeys, annotations = []) {
-  const sourcePath = availableSourceWavPath(entry, CFG, availableKeys);
+  const sourcePath = availableRecordingSource(entry, CFG, availableKeys);
   const { sourceWavPath, sourceWavEtag, sampleAudioPath, ...publicEntry } = entry;
-  return { ...publicEntry, reanalyzable: sourcePath !== null, annotations };
+  return { ...publicEntry, reanalyzable: sourcePath !== null,
+    reanalysisMode: isHistoricalRecording(entry, CFG) ? 'historical' : 'windows', annotations };
 }
 
 function annotationsByDiaryId(rows) {
@@ -590,9 +595,9 @@ function annotationsByDiaryId(rows) {
   return grouped;
 }
 
-/** List current WAV keys using two prefix scans rather than one stat per row. */
+/** List source keys by prefix rather than issuing one stat per diary row. */
 async function listAvailableSourceWavKeys({ strict = false } = {}) {
-  const prefixes = [CFG.archivePrefix, CFG.samplesPrefix];
+  const prefixes = [CFG.archivePrefix, CFG.samplesPrefix, CFG.audioPrefix, CFG.historicalArchivePrefix];
   const results = await Promise.allSettled(
     prefixes.map(prefix => listObjects(mc, CFG.bucket, prefix)),
   );
@@ -600,7 +605,7 @@ async function listAvailableSourceWavKeys({ strict = false } = {}) {
   results.forEach((result, index) => {
     if (result.status === "fulfilled") {
       for (const object of result.value) {
-        if (/\.wav$/i.test(object.name)) available.add(object.name);
+        if (/\.(wav|aac|m4a)$/i.test(object.name)) available.add(object.name);
       }
     } else {
       if (strict) throw result.reason;
@@ -1071,10 +1076,26 @@ async function reanalyzeDiary(req, reply) {
     return { error: tuningError };
   }
   const tuning = req.reanalysisTuning ?? resolveReanalyzeTuning(req.body);
-  const workers = reanalyzeWorkersForRequest(req);
+  const historical = isHistoricalRecording(entry, CFG);
+  const workers = historical ? 1 : reanalyzeWorkersForRequest(req);
 
   try {
     return await reanalysisLimiter.run(entry.id, async () => {
+      if (historical) {
+        try {
+          const result = await importHistoricalRecording({ entry, cfg: CFG, db, mc,
+            stat: statObjectIfExists, tuning: { monitorSettings: tuning.replayMonitorSettings },
+            validate: payload => validateHitMetadataPayload(payload, { requireProvenance: true }),
+            warn, progress: details => reanalysisJobs.progress(entry.id, details),
+          });
+          reply.code(201);
+          return result;
+        } catch (error) {
+          err(`historical replay failed for ${entry.id}: ${error.message}`);
+          reply.code(502);
+          return { error: error.message };
+        }
+      }
       let source;
       try {
         source = await findSourceWav(entry);
@@ -1163,8 +1184,24 @@ async function exclusiveReanalysis(recordId, operation, reply) {
   }
 }
 
-privateApi.post("/api/diary/:id/reanalyze", (req, reply) =>
-  exclusiveReanalysis(req.params.id, () => reanalyzeDiary(req, reply), reply));
+privateApi.post("/api/diary/:id/reanalyze", (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry || !isHistoricalRecording(entry, CFG)) {
+    return exclusiveReanalysis(req.params.id, () => reanalyzeDiary(req, reply), reply);
+  }
+  const error = validateReanalyzeTuning(req.body);
+  if (error) return reply.code(400).send({ error });
+  const tuning = resolveReanalyzeTuning(req.body);
+  try {
+    const status = reanalysisJobs.startRecord(entry.id, () => reanalyzeDiary({
+      params: req.params, headers: req.headers, body: req.body, reanalysisTuning: tuning,
+    }, { code() { return this; } }));
+    return reply.code(202).send(status);
+  } catch (error) {
+    if (!(error instanceof ReanalysisBusyError)) throw error;
+    return reply.code(409).send({ error: error.message });
+  }
+});
 
 privateApi.post("/api/diary/reanalyze-day", (req, reply) => {
   const { date } = req.body ?? {};
@@ -1177,7 +1214,7 @@ privateApi.post("/api/diary/reanalyze-day", (req, reply) => {
     const status = reanalysisJobs.startDay(date, async () => {
       const entries = listDiaryEntries(db, { startDate: date, endDate: date }).filter(e => e.kind === 'audio');
       const keys = await listAvailableSourceWavKeys({ strict: true });
-      const available = entries.filter(e => availableSourceWavPath(e, CFG, keys) !== null);
+      const available = entries.filter(e => availableRecordingSource(e, CFG, keys) !== null);
       return { entries: available, skipped: entries.length - available.length };
     }, async (entry) => {
       let statusCode = 200;
