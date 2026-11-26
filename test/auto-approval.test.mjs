@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AUTO_APPROVAL_SETTINGS, autoApprovalMetrics, passesAutoApproval } from '../lib/auto-approval.mjs';
+import { AUTO_APPROVAL_SETTINGS, autoApprovalMetrics, passesAutoApproval, sparseTailTrimBounds } from '../lib/auto-approval.mjs';
 import {
   autoApproveDay, getDiaryEntry, getHitMetadata, listApprovalEvents, listSettings, openDb,
   setDiaryApproved, setDiaryTrim, updateFilterSettings, upsertDiaryEntry, upsertHitMetadata, upsertSample,
@@ -58,14 +58,14 @@ test('day approval preserves approvals, freezes its audit, is repeatable, and in
     for (const id of ['sample-one', 'sample-two']) upsertSample(db, { ...entry, id, label: 'bark', diaryId: 'pass' });
     updateFilterSettings(db, { filter_bark_min: 1, filter_yap_min: 1 });
     const result = autoApproveDay(db, entry.date);
-    assert.deepEqual({ ...result, items: [] }, { date: entry.date, evaluated: 3, approved: 1, alreadyApproved: 1, skipped: 2, items: [] });
+    assert.deepEqual({ ...result, items: [] }, { date: entry.date, evaluated: 3, approved: 1, trimmed: 0, alreadyApproved: 1, skipped: 2, items: [] });
     assert.equal(getDiaryEntry(db, 'manual').approved, manual.approved);
     assert.equal(getDiaryEntry(db, 'manual').approvalSource, 'manual');
     assert.equal(getDiaryEntry(db, 'pass').approvalSource, 'auto');
     const [event] = listApprovalEvents(db, 'pass');
     assert.equal(event.approved, getDiaryEntry(db, 'pass').approved);
     assert.equal(event.source, 'auto');
-    assert.equal(event.details.ruleVersion, 1);
+    assert.equal(event.details.ruleVersion, 2);
     assert.deepEqual(event.details.thresholds, defaults);
     assert.equal(event.details.metrics.density, 50);
     assert.equal(event.details.analyzedAt, getHitMetadata(db, 'pass').analyzedAt);
@@ -123,9 +123,106 @@ test('approval settings validate ranges atomically', () => {
       { auto_approve_delta_mean_min: .49 }, { auto_approve_delta_mean_min: 1.01 },
       { auto_approve_delta_sigma_max: -.01 }, { auto_approve_delta_sigma_max: 1.01 },
       { auto_approve_density_min: '50' }, { auto_approve_density_min: 70, filter_wind_max: 2 },
+      { auto_approve_trim_sparse_tails_s: -1 }, { auto_approve_trim_sparse_tails_s: 121 },
+      { auto_approve_bundle_count: 0 }, { auto_approve_bundle_count: 6 }, { auto_approve_bundle_count: 1.5 },
     ]) assert.throws(() => updateFilterSettings(db, invalid));
     assert.equal(listSettings(db).find(row => row.key === 'auto_approve_density_min').value, 50);
     updateFilterSettings(db, { auto_approve_density_min: 70, auto_approve_delta_sigma_max: 0 });
     assert.equal(listSettings(db).find(row => row.key === 'auto_approve_density_min').value, 70);
+  } finally { db.close(); }
+});
+
+const tailSettings = { ...defaults, auto_approve_trim_sparse_tails_s: 20, auto_approve_bundle_count: 2 };
+const longEntry = { ...entry, durationSec: 400 };
+
+test('sparse-tail trim keeps multiple supported sessions and every gap and window between them', () => {
+  const timestamps = [0, 40, 45, 100, 110, 125, 180, 240, 250, 265, 320, 360, 365];
+  const raw = { timestamps, windowS: 1.5, loudnesses: timestamps.map(() => 4),
+    multilabelScores: timestamps.map(() => ({ bark: 1, wind: 0 })) };
+  const trim = sparseTailTrimBounds(longEntry, raw, tailSettings);
+  assert.deepEqual(trim, { trimStartMs: 98500, trimStopMs: 265001 });
+  const metrics = autoApprovalMetrics({ ...longEntry, ...trim }, raw);
+  assert.equal(metrics.windowCount, 7, 'includes the isolated middle hit and both sessions, including their last hit');
+  assert.deepEqual(raw.timestamps, timestamps, 'raw windows are retained');
+  assert.equal(sparseTailTrimBounds(longEntry, raw, defaults), null, 'default 0 seconds is off');
+  const reversed = { ...raw, timestamps: [...timestamps].reverse() };
+  assert.deepEqual(sparseTailTrimBounds(longEntry, reversed, tailSettings), trim);
+});
+
+test('bundle needs an extra distinct window before or after, with strict neighbour distance and inclusive bundle span', () => {
+  const find = (timestamps, bundleCount = 2) => sparseTailTrimBounds(longEntry, { timestamps, windowS: 2 },
+    { ...tailSettings, auto_approve_bundle_count: bundleCount });
+  assert.equal(find([100, 110]), null, 'an isolated pair is not enough for B=2');
+  assert.deepEqual(find([100, 120, 139]), { trimStartMs: 98000, trimStopMs: 139001 }, 'bundle spans exactly T, extra less than T after');
+  assert.deepEqual(find([100, 115, 135]), { trimStartMs: 98000, trimStopMs: 135001 }, 'extra is before the qualifying bundle');
+  assert.equal(find([100, 120], 1), null, 'exactly T to the extra window does not qualify');
+  assert.deepEqual(find([100, 119], 1), { trimStartMs: 98000, trimStopMs: 119001 });
+  assert.equal(find([100, 100], 1), null, 'a repeated timestamp is not its own supporting window');
+  assert.equal(find([100, 115, 130, 145], 3), null, 'nearby consecutive gaps alone do not make a compact B=3 bundle');
+  for (let count = 1; count <= 5; count++) {
+    assert.ok(find(Array.from({ length: count + 1 }, (_, i) => 100 + i), count), `B=${count} plus extra qualifies`);
+  }
+});
+
+test('sparse trimming respects saved bounds, keeps full first-window audio, and does nothing without valid evidence', () => {
+  const raw = { timestamps: [1, 2, 100, 110, 125, 240, 250, 265], windowS: 3 };
+  assert.deepEqual(sparseTailTrimBounds({ ...longEntry, trimStartMs: 99000, trimStopMs: 200000 }, raw, tailSettings),
+    { trimStartMs: 99000, trimStopMs: 125001 }, 'never expands a manual trim or includes a session beyond it');
+  const whole = { ...longEntry, durationSec: 4 };
+  assert.equal(sparseTailTrimBounds(whole, { timestamps: [1, 3.9999], windowS: 2 }, { ...tailSettings, auto_approve_bundle_count: 1 }), null,
+    'no change when the first full window and final anchor cover the current range');
+  for (const raw of [null, {}, { timestamps: [], windowS: 2 }, { timestamps: [100, NaN, 110], windowS: 2 }, { timestamps: [100, 110], windowS: 0 }]) {
+    assert.equal(sparseTailTrimBounds(longEntry, raw, tailSettings), null);
+  }
+});
+
+test('day operation evaluates proposed trim, saves only passing trims, preserves existing approvals, and audits both bounds', () => {
+  const db = openDb(':memory:');
+  try {
+    const base = { ...entry, durationSec: 200, trimStartMs: 1000, trimStopMs: 199000 };
+    for (const id of ['trim-pass', 'trim-fail', 'approved']) {
+      upsertDiaryEntry(db, { ...base, id });
+      upsertHitMetadata(db, id, { timestamps: [5, 100, 105, 190], windowS: 2,
+        loudnesses: [1, 4, id === 'trim-fail' ? 1 : 4, 1], confidences: [1, 1, 1, 1],
+        multilabelScores: [{ bark: 0, wind: 1 }, { bark: 1, wind: 0 }, { bark: 1, wind: 0 }, { bark: 0, wind: 1 }] });
+    }
+    const approved = setDiaryApproved(db, 'approved', true);
+    assert.equal(autoApproveDay(db, entry.date).approved, 0, 'disabled trimming uses the original evidence');
+    updateFilterSettings(db, { auto_approve_trim_sparse_tails_s: 20, auto_approve_bundle_count: 1 });
+    const result = autoApproveDay(db, entry.date);
+    assert.equal(result.trimmed, 1);
+    assert.equal(result.approved, 1);
+    assert.equal(result.skipped, 1);
+    assert.equal(result.alreadyApproved, 1);
+    assert.deepEqual(result.items[0], { id: 'trim-pass', approved: getDiaryEntry(db, 'trim-pass').approved,
+      approvalSource: 'auto', trimStartMs: 98000, trimStopMs: 105001 });
+    const failed = getDiaryEntry(db, 'trim-fail');
+    assert.equal(failed.approved, null);
+    assert.equal(failed.trimStartMs, 1000);
+    assert.equal(failed.trimStopMs, 199000);
+    assert.equal(getDiaryEntry(db, 'approved').approved, approved.approved);
+    assert.equal(getDiaryEntry(db, 'approved').trimStartMs, 1000);
+    assert.equal(getDiaryEntry(db, 'approved').trimStopMs, 199000);
+    const [audit] = listApprovalEvents(db, 'trim-pass');
+    assert.deepEqual(audit.details.sparseTailTrim, {
+      before: { trimStartMs: 1000, trimStopMs: 199000 }, after: { trimStartMs: 98000, trimStopMs: 105001 },
+    });
+    assert.equal(audit.details.metrics.windowCount, 2);
+    assert.equal(audit.details.trimStartMs, 98000);
+    assert.equal(getHitMetadata(db, 'trim-pass').timestamps.length, 4, 'raw metadata is never removed');
+  } finally { db.close(); }
+});
+
+test('audit failure rolls back the proposed trim and approval together', () => {
+  const db = openDb(':memory:');
+  try {
+    upsertDiaryEntry(db, { ...longEntry, id: 'rollback' });
+    upsertHitMetadata(db, 'rollback', metadata);
+    updateFilterSettings(db, { auto_approve_trim_sparse_tails_s: 20 });
+    db.exec("CREATE TRIGGER reject_approval BEFORE INSERT ON approval_events BEGIN SELECT RAISE(ABORT, 'test audit failure'); END");
+    assert.throws(() => autoApproveDay(db, entry.date), /test audit failure/);
+    assert.equal(getDiaryEntry(db, 'rollback').approved, null);
+    assert.equal(getDiaryEntry(db, 'rollback').trimStartMs, null);
+    assert.equal(getDiaryEntry(db, 'rollback').trimStopMs, null);
   } finally { db.close(); }
 });

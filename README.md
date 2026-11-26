@@ -668,16 +668,45 @@ Automatic approval settings are seeded without replacing saved values:
 | `auto_approve_density_min` | 0–100 | 50 | Density percentage ≥ threshold |
 | `auto_approve_delta_mean_min` | 0.5–1 | 0.9 | Mean delta ≥ threshold |
 | `auto_approve_delta_sigma_max` | 0–1 | 0.1 | Population delta sigma ≤ threshold |
+| `auto_approve_trim_sparse_tails_s` | 0–120 | 0 | Optional sparse-tail trimming time limit in seconds; 0 is off |
+| `auto_approve_bundle_count` | Integer 1–5 | 1 | Windows in a compact bundle, plus one nearby supporting window |
 
 `POST /api/diary/auto-approve-day` evaluates only currently unapproved audio
 records for the supplied local diary date. It runs synchronously in one
 transaction, freezing thresholds and evidence. Existing approvals are left
 untouched. An active re-analysis returns 409. Nothing is automatically approved
 on ingest, re-analysis, threshold changes, or page load; use the day button.
-The response includes `evaluated`, `approved`, `alreadyApproved`, `skipped`, and
-`items` containing the newly approved IDs, timestamps, and approval sources.
+The response includes `evaluated`, `approved`, `trimmed`, `alreadyApproved`,
+`skipped`, and `items` containing the newly approved IDs, timestamps, approval
+sources, and saved trim bounds. Clients merge the bounds into diary/player
+state and refresh report summaries after a trim.
 
-Metrics use all detected hits inside the saved trim (start inclusive, stop
+Sparse-tail trimming is optional and off by default. For a time limit T > 0
+and bundle count B, inspect chronologically ordered distinct hit timestamps
+inside the current saved trim. A qualifying bundle contains B consecutive
+hits spanning at most T seconds, with an additional hit strictly less than T
+seconds before its first hit or after its last. Keep the range from the first
+qualifying group through the last, including the supporting hits and every
+session, gap, and isolated hit between them. An isolated B-hit bundle without
+support does not qualify. For B=1 this requires a pair; B=2 requires a compact
+pair plus a third nearby hit. No qualifying group leaves the trim unchanged.
+
+For example, T=20 and B=2 with hits at
+`0,40,45,100,110,125,180,240,250,265,320,360,365` retains the range anchored by
+100 and 265. The isolated middle hit at 180 remains; both exterior pairs are
+removed from view. Hit timestamps mark inference-window ends, so the saved
+start retains the first full `window_s` of audio and the stop includes the
+final timestamp under half-open bounds (one millisecond after its anchor).
+Existing trim bounds are never expanded. Raw audio and hit metadata remain
+unchanged.
+
+Compute all approval metrics on this proposed range. Save its trim and approval
+together only when all four approval conditions pass. A failed approval leaves
+the previous trim unchanged. Audit rule version 2 includes the before/after
+trim bounds and both trimming settings. Changing settings alone never trims
+a record or changes an existing approval.
+
+Metrics use all detected hits inside the proposed trim (start inclusive, stop
 exclusive), ignoring presentation filters. With no valid trim they use the
 full recording. Density is `count * hit_metadata.window_s / duration * 100`,
 without rounding before comparison or clamping overlapping windows to 100%.

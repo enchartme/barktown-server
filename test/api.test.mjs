@@ -873,7 +873,7 @@ test('presentation filter settings are public to read and private to update atom
   const get = await fetch(`${publicServer.baseUrl}/api/settings`);
   assert.equal(get.status, 200);
   const defaults = await get.json();
-  assert.equal(defaults.length, 28);
+  assert.equal(defaults.length, 30);
   assert.equal(defaults.find(row => row.key === 'filter_bark_min').value, 0);
   assert.equal(defaults.find(row => row.key === 'filter_bark_max').value, 1);
   assert.ok(defaults.every(row => row.description));
@@ -941,4 +941,36 @@ test('day auto-approval and audit are private, use saved thresholds, and retain 
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_approve_density_min: 65 }),
   })).status, 200);
   assert.equal((await (await fetch(`${publicServer.baseUrl}/api/settings`)).json()).find(row => row.key === 'auto_approve_density_min').value, 65);
+});
+
+test('day auto-approval returns persisted sparse-tail trims and updates public duration and bark summaries', async () => {
+  const date = '2026-11-25';
+  const id = `${date}_sparse-tails-test`;
+  upsertDiaryEntry(seedDb, { id, filename: `${id}.mp3`, audioPath: `audio/${id}.mp3`, date,
+    time: '12:00', datetimeLocal: `${date}T12:00:00`, durationSec: 200, kind: 'audio' });
+  upsertHitMetadata(seedDb, id, { timestamps: [10, 100, 105, 190], confidences: [1, 1, 1, 1], loudnesses: [1, 4, 4, 1], windowS: 2,
+    multilabelScores: [{ bark: 0, wind: 1 }, { bark: 1, wind: 0 }, { bark: 1, wind: 0 }, { bark: 0, wind: 1 }] });
+  const settingsPath = `${privateServer.baseUrl}/api/settings`;
+  const patch = body => fetch(settingsPath, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await patch({ auto_approve_bundle_count: 1.5 })).status, 400);
+  assert.equal((await patch({ auto_approve_trim_sparse_tails_s: 20, auto_approve_bundle_count: 1, auto_approve_density_min: 50 })).status, 200);
+  const response = await fetch(`${privateServer.baseUrl}/api/diary/auto-approve-day`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date }),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.approved, 1);
+  assert.equal(result.trimmed, 1);
+  assert.equal(result.items[0].trimStartMs, 98000);
+  assert.equal(result.items[0].trimStopMs, 105001);
+  const saved = await (await fetch(`${publicServer.baseUrl}/api/diary/${id}`)).json();
+  assert.equal(saved.trimStartMs, 98000);
+  assert.equal(saved.trimStopMs, 105001);
+  assert.equal(saved.durationSec, 200, 'original duration is retained');
+  const summary = await (await fetch(`${publicServer.baseUrl}/api/diary-summary?startDate=${date}&endDate=${date}`)).json();
+  assert.equal(summary.days[0].barks, 2);
+  assert.equal(summary.days[0].disturbedTimeSec, 7.001);
+  const history = await (await fetch(`${privateServer.baseUrl}/api/diary/${id}/approval-events`)).json();
+  assert.equal(history[0].details.sparseTailTrim.before.trimStartMs, null);
+  assert.equal(history[0].details.sparseTailTrim.after.trimStartMs, 98000);
 });
