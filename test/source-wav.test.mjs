@@ -35,6 +35,7 @@ test("openDb migrates source identity and trim columns while diary upserts retai
     const columns = new Set(db.prepare("PRAGMA table_info(diary_entries)").all().map(row => row.name));
     assert.ok(columns.has("source_wav_path"));
     assert.ok(columns.has("source_wav_etag"));
+    assert.ok(columns.has("source_recording"));
     assert.ok(columns.has("trim_start_ms"));
     assert.ok(columns.has("trim_stop_ms"));
     assert.ok(columns.has("approved"));

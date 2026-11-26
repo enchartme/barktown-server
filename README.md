@@ -383,6 +383,27 @@ offset remains in provenance even though filenames have whole-second precision.
 Hit timestamps are relative to the extracted clip. The final maximum-length cap
 matches Goblin's uploader by retaining the tail.
 
+Every generated diary record also stores a persistent `sourceRecording` object
+in `diary_entries.source_recording`, exposed by `GET /api/diary` and retained in
+the fallback index. It is independent of hit metadata:
+
+```json
+{
+  "type": "historical",
+  "filename": "2023-05-31 23-59-00 barks at car.m4a",
+  "datetimeLocal": "2023-05-31T23:59:00",
+  "durationSec": 7200,
+  "clipStartSec": 60,
+  "clipStopSec": 64.5
+}
+```
+
+This identifies the original recording and exact clip interval even after hits
+are deleted or replaced by another analysis. Routine diary upserts preserve the
+original value. Other recordings return `sourceRecording: null`. Writable
+startup adds the column and backfills earlier historical clips from surviving
+replay provenance where available; already-overwritten provenance is not guessed.
+
 `POST /api/diary/:id/reanalyze` returns **202** immediately for these imports.
 `GET /api/reanalysis` exposes stages, event counts, errors and replacement IDs;
 the UI polls it and refreshes the diary/report when the job completes. Day jobs also
@@ -392,8 +413,9 @@ remain available for review, with empty hit metadata. A failure retains the orig
 entry and rolls back newly published event objects. Existing clip filenames are never
 deliberately overwritten; collisions fail the import.
 
-Deploy **Goblin analyzer first, then server and UI**. No recording-Pi update or database
-migration is needed for this feature. The server image already includes ffmpeg,
+Deploy **Goblin analyzer first, then server and UI**. Restart a writable server
+process (private API or ingest) before the public API so the automatic recording-origin
+migration runs first. No recording-Pi update is needed. The server image already includes ffmpeg,
 ffprobe and audiowaveform. Inference keeps one trailing window in RAM; the decoded
 source lives on temporary disk. The default replay upload cap is 1 GiB (about nine
 hours of 16 kHz mono PCM), and the analyzer processing timeout is 24 hours. Raise

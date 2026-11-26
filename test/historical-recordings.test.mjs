@@ -6,7 +6,8 @@ import path from 'node:path';
 import { buildConfig } from '../lib/config.mjs';
 import { parseFilename } from '../lib/filenames.mjs';
 import { openDb, upsertDiaryEntry, getDiaryEntry, getDiaryNote, upsertDiaryNote, getHitMetadata,
-  replaceHistoricalDiaryEntry, setDiaryApproved } from '../lib/db.mjs';
+  replaceHistoricalDiaryEntry, setDiaryApproved, listDiaryEntries, saveReanalysisResult,
+  deleteHitMetadataRow, upsertHitMetadata } from '../lib/db.mjs';
 import { historicalArchiveKey, archiveHistoricalRecording, availableRecordingSource,
   localTimestampAtOffset, planHistoricalClips } from '../lib/historical-recordings.mjs';
 
@@ -54,6 +55,10 @@ test('clip clocks use filename local time, padding, and month rollover with alig
   assert.deepEqual(clips[0].hitMetadata.confidences, [.95, .96]);
   assert.deepEqual(clips[1].hitMetadata.multilabelScores, [{ bark: .3 }, { bark: .4 }]);
   assert.equal(clips[0].hitMetadata.analysisSettings.source_recording.clip_start_s, 60);
+  assert.deepEqual(clips[0].sourceRecording, {
+    type: 'historical', filename, datetimeLocal: '2023-05-31T23:59:00',
+    durationSec: 7200, clipStartSec: 60, clipStopSec: 64.5,
+  });
   const capped = payload();
   capped.analysis_settings.events = [{ start_ts: 1, end_ts: 100, hit_start_index: 0, hit_stop_index: 4 }];
   const [clip] = planHistoricalClips(entry, cfg, capped, 7200, settings);
@@ -80,4 +85,51 @@ test('replacement commits all clips and notes atomically and rolls back on ident
   assert.equal(getDiaryEntry(db, clips[0].id).approved, null);
   assert.deepEqual(getHitMetadata(db, clips[0].id).timestamps, [1.5, 3]);
   assert.match(getDiaryNote(db, clips[0].id).label, /barks at car\noperator comment/);
+  const expected = clips[0].sourceRecording;
+  assert.deepEqual(getDiaryEntry(db, clips[0].id).sourceRecording, expected);
+  deleteHitMetadataRow(db, clips[0].id);
+  assert.deepEqual(getDiaryEntry(db, clips[0].id).sourceRecording, expected, 'origin survives deleting all hits');
+  saveReanalysisResult(db, clips[0].id, {
+    timestamps: [2], confidences: [.99], loudnesses: [1],
+    analysisSettings: { analysis_mode: 'deterministic_window_reclassification' }, analysisTrigger: 'manual',
+  });
+  upsertDiaryEntry(db, { ...clips[0], sourceRecording: null });
+  assert.deepEqual(getDiaryEntry(db, clips[0].id).sourceRecording, expected, 're-analysis and stale index imports retain origin');
+  upsertDiaryEntry(db, { ...clips[0], sourceRecording: { type: 'incorrect replacement' } });
+  assert.deepEqual(listDiaryEntries(db).find(e => e.id === clips[0].id).sourceRecording, expected, 'routine upserts cannot replace origin');
+  const reopened = openDb(path.join(tmp, 'test.db'));
+  try { assert.deepEqual(getDiaryEntry(reopened, clips[0].id).sourceRecording, expected); }
+  finally { reopened.close(); }
+});
+
+test('schema migration backfills historical origin without guessing missing or malformed provenance', t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'barktown-history-migration-'));
+  const dbPath = path.join(tmp, 'test.db');
+  let db = openDb(dbPath);
+  t.after(() => { db.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
+  const [clip] = planHistoricalClips(entry, cfg, payload(), 7200, settings);
+  upsertDiaryEntry(db, { ...clip, sourceRecording: null });
+  upsertHitMetadata(db, clip.id, clip.hitMetadata);
+  for (const [id, analysisSettings] of [
+    ['plain', {}], ['incomplete', { analysis_mode: 'historical_stream_replay' }],
+    ['malformed', { analysis_mode: 'historical_stream_replay', source_recording: {
+      filename, datetime_local: entry.datetimeLocal, clip_start_s: -1, clip_stop_s: 2, duration_s: 7200,
+    } }],
+  ]) {
+    upsertDiaryEntry(db, { ...entry, id });
+    upsertHitMetadata(db, id, { timestamps: [], analysisSettings });
+  }
+  db.exec('ALTER TABLE diary_entries DROP COLUMN source_recording');
+  db.close();
+  db = openDb(dbPath);
+  assert.deepEqual(getDiaryEntry(db, clip.id).sourceRecording, clip.sourceRecording);
+  for (const id of ['plain', 'incomplete', 'malformed']) assert.equal(getDiaryEntry(db, id).sourceRecording, null);
+  // Startup must never replace an existing record origin using later hit data.
+  upsertHitMetadata(db, clip.id, { ...clip.hitMetadata, analysisSettings: {
+    ...clip.hitMetadata.analysisSettings,
+    source_recording: { ...clip.hitMetadata.analysisSettings.source_recording, filename: 'different.aac' },
+  } });
+  db.close();
+  db = openDb(dbPath);
+  assert.deepEqual(getDiaryEntry(db, clip.id).sourceRecording, clip.sourceRecording);
 });

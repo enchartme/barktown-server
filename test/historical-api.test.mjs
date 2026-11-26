@@ -7,7 +7,7 @@ import http from 'node:http';
 import { setTimeout } from 'node:timers/promises';
 import { startTestServer } from './helpers/test-server.mjs';
 import { parseFilename } from '../lib/filenames.mjs';
-import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata } from '../lib/db.mjs';
+import { openDb, upsertDiaryEntry, getDiaryEntry, getHitMetadata, deleteHitMetadataRow, saveReanalysisResult } from '../lib/db.mjs';
 
 async function until(read, check) {
   for (let i = 0; i < 200; i++) {
@@ -84,6 +84,22 @@ test('historical UI request archives, replays and publishes clips; upload failur
   const clip = getDiaryEntry(db, done.replacementIds[0]);
   assert.equal(clip.datetimeLocal, '2023-06-01T00:00:00');
   assert.deepEqual(getHitMetadata(db, clip.id).timestamps, [1.5, 3]);
+  const sourceRecording = {
+    type: 'historical', filename: first.filename, datetimeLocal: first.datetimeLocal,
+    durationSec: 7200, clipStartSec: 60, clipStopSec: 64.5,
+  };
+  const publicClip = async () => (await fetch(`${publicApi.baseUrl}/api/diary`).then(r => r.json())).find(e => e.id === clip.id);
+  assert.deepEqual((await publicClip()).sourceRecording, sourceRecording);
+  assert.equal((await publicClip()).reanalysisMode, 'windows', 'persistent origin does not replay the original file again');
+  deleteHitMetadataRow(db, clip.id);
+  assert.deepEqual((await publicClip()).sourceRecording, sourceRecording);
+  saveReanalysisResult(db, clip.id, {
+    timestamps: [2], confidences: [.99], loudnesses: [1],
+    analysisSettings: { analysis_mode: 'deterministic_window_reclassification' }, analysisTrigger: 'manual',
+  });
+  assert.deepEqual((await publicClip()).sourceRecording, sourceRecording);
+  const fallback = JSON.parse(fs.readFileSync(path.join(store, 'index.json'), 'utf8'));
+  assert.deepEqual(fallback.find(e => e.id === clip.id).sourceRecording, sourceRecording);
   assert.ok(fs.existsSync(path.join(store, clip.audioPath)));
   assert.ok(fs.existsSync(path.join(store, clip.sourceWavPath)));
   assert.equal(fs.existsSync(path.join(store, first.audioPath)), false);
