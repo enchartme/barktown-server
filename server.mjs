@@ -36,6 +36,7 @@ import path from "path";
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import compress from "@fastify/compress";
 import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload, listObjects } from "./lib/minio.mjs";
 import { canonicalizeAutoDetectionId, parseSampleFilename } from "./lib/filenames.mjs";
@@ -94,6 +95,10 @@ const corsMethods = isPublicApi
   ? ["GET", "HEAD", "OPTIONS"]
   : ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 await app.register(cors, { origin: true, methods: corsMethods });
+if (isPublicApi) {
+  // Opt in only the large projection CSV; leave other API responses unchanged.
+  await app.register(compress, { global: false, encodings: ["gzip"] });
+}
 
 if (isPublicApi) {
   // The public API is a live, filtered database view. Keep Cloudflare and
@@ -606,6 +611,20 @@ async function listAvailableSourceWavKeys({ strict = false } = {}) {
 }
 
 app.get("/health", async () => ({ ok: true }));
+
+publicApi.get("/api/training/projection.csv", { compress: { encodings: ["gzip"] } }, async (_req, reply) => {
+  let stream;
+  try {
+    stream = await mc.getObject(CFG.bucket, "training-set-projection.csv");
+  } catch (error) {
+    if (error.code === "NoSuchKey" || error.code === "NoSuchObject" || error.code === "NotFound") {
+      return reply.code(404).send({ error: "training projection not found" });
+    }
+    err(`could not read training projection from MinIO: ${error.message}`);
+    return reply.code(502).send({ error: "training projection storage unavailable" });
+  }
+  return reply.type("text/csv; charset=utf-8").send(stream);
+});
 
 publicApi.get('/api/settings', async () => listSettings(db));
 privateApi.get('/api/settings', async () => listSettings(db));

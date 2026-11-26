@@ -188,9 +188,16 @@ npm run server:private
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
 | `GET /api/samples/:id/data-quality` | Get capture-integrity facts retained with a moved sample |
 | `GET /api/annotations` | List every annotation across all samples in one request (includes each annotation's sample `audioPath`/`durationSec`) — for laptop-side training export tooling |
+| `GET /api/training/projection.csv` | Stream `training-set-projection.csv` from the configured MinIO bucket, with gzip when accepted by the client |
 
 Public responses send `Cache-Control: no-store`; filtering and freshness come
 from live database queries rather than an independently cached data dump.
+The training projection route also uses `no-store` and streams the current
+MinIO object without buffering the complete CSV. It negotiates gzip through
+`Accept-Encoding` and sends `Vary: Accept-Encoding`; clients that do not accept
+gzip receive the original CSV. The browser decompresses the response before
+the UI parses it. The route returns `404` for a missing object and `502` when
+storage cannot be reached. Audio continues to load directly from MinIO.
 Diary entries include an `annotations` array containing only whole-recording
 notes. Linked recordings expose their sample-wide `0..0` note annotations;
 unlinked recordings expose the equivalent diary-scoped notes.
