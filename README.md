@@ -664,6 +664,7 @@ Automatic approval settings are seeded without replacing saved values:
 
 | Key | Range | Default | Condition |
 | --- | --- | --- | --- |
+| `auto_approve_require_all` | Integer 0–1 | 1 | 1 = AND (all 4 conditions), 0 = OR (at least 1) |
 | `auto_approve_mean_loudness_min` | 1–10 | 4 | Mean loudness ≥ threshold |
 | `auto_approve_density_min` | 0–100 | 50 | Density percentage ≥ threshold |
 | `auto_approve_delta_mean_min` | 0.5–1 | 0.9 | Mean delta ≥ threshold |
@@ -701,9 +702,9 @@ Existing trim bounds are never expanded. Raw audio and hit metadata remain
 unchanged.
 
 Compute all approval metrics on this proposed range. Save its trim and approval
-together only when all four approval conditions pass. A failed approval leaves
-the previous trim unchanged. Audit rule version 2 includes the before/after
-trim bounds and both trimming settings. Changing settings alone never trims
+together only when the selected AND/OR approval rule passes. A failed approval leaves
+the previous trim unchanged. Audit rule version 3 includes the before/after
+trim bounds, both trimming settings, and the AND/OR setting. Changing settings alone never trims
 a record or changes an existing approval.
 
 Metrics use all detected hits inside the proposed trim (start inclusive, stop
@@ -711,7 +712,10 @@ exclusive), ignoring presentation filters. With no valid trim they use the
 full recording. Density is `count * hit_metadata.window_s / duration * 100`,
 without rounding before comparison or clamping overlapping windows to 100%.
 Delta is `max(bark, yap) - max(other canonical labels)` and sigma is the
-population standard deviation of those deltas. All four thresholds must pass.
+population standard deviation of those deltas. `auto_approve_require_all = 1`
+(the default) requires all four thresholds to pass; `0` accepts at least one
+passing threshold. An absent mode keeps AND behavior. The join applies only
+to the four numerical approval conditions, including sigma's upper bound.
 Missing metadata, invalid window duration, fewer than two retained hits, or
 any retained hit without loudness and both label groups leave the record
 unapproved. The sigma default is a strict starting point to tune against

@@ -28,6 +28,48 @@ test('all four conditions are inclusive and use precise unrounded metrics and ac
   assert.equal(passesAutoApproval(autoApprovalMetrics(entry, { ...metadata, windowS: 1.5 }), defaults), false);
 });
 
+test('AND requires all four conditions and OR accepts each individual condition including sigma', () => {
+  const failing = { meanLoudness: 1, density: 0, deltaMean: 0, deltaSigma: 1 };
+  const orSettings = { ...defaults, auto_approve_require_all: 0 };
+  assert.equal(passesAutoApproval(failing, orSettings), false);
+  assert.equal(passesAutoApproval(null, orSettings), false);
+  for (const [metric, value] of [['meanLoudness', 4], ['density', 50], ['deltaMean', .9], ['deltaSigma', .1]]) {
+    const onePassing = { ...failing, [metric]: value };
+    assert.equal(passesAutoApproval(onePassing, orSettings), true, `${metric} alone passes OR`);
+    assert.equal(passesAutoApproval(onePassing, defaults), false, `${metric} alone fails AND`);
+    const { auto_approve_require_all, ...legacySettings } = defaults;
+    assert.equal(passesAutoApproval(onePassing, legacySettings), false, 'missing mode keeps AND');
+  }
+  const allPassing = autoApprovalMetrics(entry, metadata);
+  assert.equal(passesAutoApproval(allPassing, orSettings), true);
+  assert.equal(passesAutoApproval(allPassing, defaults), true);
+});
+
+test('day operation uses the saved join mode, audits it, and still requires complete multi-window evidence', () => {
+  const db = openDb(':memory:');
+  try {
+    const densityOnly = { ...metadata, loudnesses: [1, 1], multilabelScores: [{ bark: 0, wind: 1 }, { bark: 1, wind: 0 }] };
+    for (const id of ['density-only', 'missing-scores', 'singleton', 'none-pass']) upsertDiaryEntry(db, { ...entry, id });
+    upsertHitMetadata(db, 'density-only', densityOnly);
+    upsertHitMetadata(db, 'missing-scores', { ...densityOnly, multilabelScores: null });
+    upsertHitMetadata(db, 'singleton', { timestamps: [2], loudnesses: [4], confidences: [1], windowS: 2, multilabelScores: [{ bark: 1, wind: 0 }] });
+    upsertHitMetadata(db, 'none-pass', { ...densityOnly, windowS: 1 });
+    assert.equal(autoApproveDay(db, entry.date).approved, 0);
+    updateFilterSettings(db, { auto_approve_require_all: 0 });
+    const result = autoApproveDay(db, entry.date);
+    assert.equal(result.approved, 1);
+    assert.equal(result.skipped, 3);
+    assert.equal(result.items[0].id, 'density-only');
+    const [event] = listApprovalEvents(db, 'density-only');
+    assert.equal(event.details.thresholds.auto_approve_require_all, 0);
+    assert.equal(event.details.ruleVersion, 3);
+    assert.equal(event.details.metrics.density, 50);
+    updateFilterSettings(db, { auto_approve_require_all: 1 });
+    assert.equal(listApprovalEvents(db, 'density-only')[0].details.thresholds.auto_approve_require_all, 0);
+    assert.equal(autoApproveDay(db, entry.date).alreadyApproved, 1);
+  } finally { db.close(); }
+});
+
 test('saved trim uses half-open bounds and all unfiltered diagnostics, with population sigma', () => {
   const trimmed = { ...entry, durationSec: 20, trimStartMs: 5000, trimStopMs: 13000 };
   const raw = { ...metadata, timestamps: [1, 5, 9, 13], loudnesses: [0, 3, 5, 0],
@@ -65,7 +107,7 @@ test('day approval preserves approvals, freezes its audit, is repeatable, and in
     const [event] = listApprovalEvents(db, 'pass');
     assert.equal(event.approved, getDiaryEntry(db, 'pass').approved);
     assert.equal(event.source, 'auto');
-    assert.equal(event.details.ruleVersion, 2);
+    assert.equal(event.details.ruleVersion, 3);
     assert.deepEqual(event.details.thresholds, defaults);
     assert.equal(event.details.metrics.density, 50);
     assert.equal(event.details.analyzedAt, getHitMetadata(db, 'pass').analyzedAt);
@@ -125,6 +167,8 @@ test('approval settings validate ranges atomically', () => {
       { auto_approve_density_min: '50' }, { auto_approve_density_min: 70, filter_wind_max: 2 },
       { auto_approve_trim_sparse_tails_s: -1 }, { auto_approve_trim_sparse_tails_s: 121 },
       { auto_approve_bundle_count: 0 }, { auto_approve_bundle_count: 6 }, { auto_approve_bundle_count: 1.5 },
+      { auto_approve_require_all: -1 }, { auto_approve_require_all: 2 }, { auto_approve_require_all: .5 },
+      { auto_approve_require_all: 'OR' }, { auto_approve_require_all: false },
     ]) assert.throws(() => updateFilterSettings(db, invalid));
     assert.equal(listSettings(db).find(row => row.key === 'auto_approve_density_min').value, 50);
     updateFilterSettings(db, { auto_approve_density_min: 70, auto_approve_delta_sigma_max: 0 });
