@@ -27,7 +27,7 @@ RUN set -eu; \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=dependencies /app/node_modules ./node_modules
-COPY package.json server.mjs server-private.mjs ingest-service.mjs dump-db.mjs bulk-reanalyze.mjs ./
+COPY package.json server.mjs server-private.mjs ingest-service.mjs dump-db.mjs bulk-reanalyze.mjs repair-sample-diary-links.mjs ./
 COPY lib ./lib
 COPY deploy/database.mjs deploy/require-db.sh ./deploy/
 USER node
