@@ -25,9 +25,10 @@ test('historical UI request archives, replays and publishes clips; upload failur
   const dbPath = path.join(tmp, 'db.sqlite');
   const db = openDb(dbPath);
   t.after(() => { db.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
-  function seed(filename) {
+  function seed(filename, overrides = {}) {
     const entry = { ...parseFilename(filename), filename, audioPath: `audio/2023/05/${filename}`, durationSec: 7200, kind: 'audio' };
     entry.waveformPath = `waveforms/2023/05/${entry.id}.json`;
+    Object.assign(entry, overrides);
     upsertDiaryEntry(db, entry);
     fs.mkdirSync(path.dirname(path.join(store, entry.audioPath)), { recursive: true });
     fs.writeFileSync(path.join(store, entry.audioPath), 'original compressed audio');
@@ -174,9 +175,10 @@ test('historical UI request archives, replays and publishes clips; upload failur
   assert.equal(bulkDone.failed, 0, JSON.stringify(bulkDone.errors));
   assert.equal(bulkDone.completed, 2);
   assert.equal(received - beforeBulk, 2, 'each historical bulk recording requests three workers');
-  const short = seed('2023-05-28 12-00-00 no-stream.aac');
-  const following = seed('2023-05-28 15-00-00 following.m4a');
+  const short = seed('2023-05-28 12-00-00 no-stream.aac', { kind: 'note', durationSec: 4.999 });
+  const following = seed('2023-05-28 15-00-00 following.m4a', { durationSec: 5 });
   const beforeShort = received;
+  const commandsBeforeShort = fs.readFileSync(env.HISTORICAL_TEST_LOG, 'utf8');
   const shortBatch = await fetch(`${privateApi.baseUrl}/api/diary/reanalyze-day`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ date: '2023-05-28', uploadMinScore: 0 }),
@@ -184,20 +186,23 @@ test('historical UI request archives, replays and publishes clips; upload failur
   assert.equal(shortBatch.status, 202);
   const shortDone = await until(status, s => !s.active);
   assert.equal(shortDone.failed, 0, JSON.stringify(shortDone.errors));
-  assert.equal(shortDone.completed, 2, 'a streamless file does not stop the batch');
+  assert.equal(shortDone.completed, 2, 'notes are archived successfully and the batch continues');
   assert.equal(received - beforeShort, 1, 'only the following audio is analyzed');
   const note = getDiaryEntry(db, short.id);
   assert.equal(note.kind, 'note');
   assert.equal(note.label, short.label);
   assert.equal(note.datetimeLocal, short.datetimeLocal);
-  assert.equal(note.waveformPath, null);
-  assert.equal(note.durationSec, 0);
+  assert.equal(note.waveformPath, short.waveformPath);
+  assert.equal(note.durationSec, 4.999);
+  const shortCommands = fs.readFileSync(env.HISTORICAL_TEST_LOG, 'utf8').slice(commandsBeforeShort.length);
+  assert.doesNotMatch(shortCommands, /no-stream/, 'notes never invoke any codec or probe');
+  assert.equal(note.sourceRecording, null, 'notes need no decode-failure marker');
   assert.ok(getDiaryEntry(db, following.id));
   assert.equal(fs.readFileSync(path.join(store, short.audioPath), 'utf8'), 'original compressed audio');
   assert.equal(fs.readFileSync(path.join(store, short.audioPath.replace('audio/', 'historical-recordings-archive/')), 'utf8'), 'original compressed audio');
   const notes = await fetch(`${publicApi.baseUrl}/api/diary`).then(r => r.json());
-  assert.equal(notes.find(e => e.id === short.id).reanalyzable, false);
+  assert.equal(notes.find(e => e.id === short.id).reanalyzable, true, 'notes remain eligible for idempotent archiving');
   const updatedIndex = JSON.parse(fs.readFileSync(path.join(store, 'index.json'), 'utf8'));
-  assert.equal(updatedIndex.find(e => e.id === short.id).kind, 'note');
+  assert.equal(updatedIndex.find(e => e.id === short.id), undefined, 'archiving a note does not rewrite the fallback index');
   assert.equal(getMonitorParamsMap(db).upload_min_score, .99, 'single and day overrides leave live settings unchanged');
 });

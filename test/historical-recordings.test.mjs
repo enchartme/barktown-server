@@ -16,6 +16,12 @@ const filename = '2023-05-31 23-59-00 barks at car.m4a';
 const entry = { ...parseFilename(filename), filename, audioPath: `audio/2023/05/${filename}`,
   waveformPath: 'waveforms/old.json', durationSec: 7200, kind: 'audio' };
 const settings = { padding_s: 1.5, max_clip_s: 30 };
+test('text recordings remain eligible for historical archiving', () => {
+  const keys = new Set([entry.audioPath]);
+  const note = { ...entry, kind: 'note', durationSec: 0.5 };
+  assert.equal(availableRecordingSource(note, cfg, keys), entry.audioPath);
+  assert.equal(availableRecordingSource(note, cfg, new Set([historicalArchiveKey(note, cfg)])), historicalArchiveKey(note, cfg));
+});
 function payload() {
   return { timestamps: [61.5, 63, 100, 101.5], confidences: [.95, .96, .97, .98], loudnesses: [1, 2, 3, 4],
     multilabel_scores: [{ bark: .1 }, { bark: .2 }, { bark: .3 }, { bark: .4 }], window_s: 1.5,

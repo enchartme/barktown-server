@@ -1237,7 +1237,8 @@ privateApi.post("/api/diary/reanalyze-day", (req, reply) => {
   const tuning = resolveReanalyzeTuning(req.body);
   try {
     const status = reanalysisJobs.startDay(date, async () => {
-      const entries = listDiaryEntries(db, { startDate: date, endDate: date }).filter(e => e.kind === 'audio');
+      const entries = listDiaryEntries(db, { startDate: date, endDate: date })
+        .filter(e => e.kind === 'audio' || isHistoricalRecording(e, CFG));
       const keys = await listAvailableSourceWavKeys({ strict: true });
       const available = entries.filter(e => availableRecordingSource(e, CFG, keys) !== null);
       return { entries: available, skipped: entries.length - available.length };
