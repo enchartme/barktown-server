@@ -42,6 +42,9 @@ test('historical UI request archives, replays and publishes clips; upload failur
   fs.writeFileSync(binary, `#!${process.execPath}
     const fs = require('fs'); const args = process.argv.slice(2);
     fs.appendFileSync(process.env.HISTORICAL_TEST_LOG, JSON.stringify(args) + '\\n');
+    if (args.includes('-i') && args[args.indexOf('-i')+1].includes('no-stream')) {
+      console.error('Output file #0 does not contain any stream'); process.exit(1);
+    }
     if (args.includes('-show_format')) console.log(JSON.stringify({format:{duration:7200}}));
     else if(args.includes('--bits')) fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({data:[0,1]}));
     else fs.copyFileSync(args[args.indexOf('-i')+1], args.at(-1));
@@ -171,5 +174,30 @@ test('historical UI request archives, replays and publishes clips; upload failur
   assert.equal(bulkDone.failed, 0, JSON.stringify(bulkDone.errors));
   assert.equal(bulkDone.completed, 2);
   assert.equal(received - beforeBulk, 2, 'each historical bulk recording requests three workers');
+  const short = seed('2023-05-28 12-00-00 no-stream.aac');
+  const following = seed('2023-05-28 15-00-00 following.m4a');
+  const beforeShort = received;
+  const shortBatch = await fetch(`${privateApi.baseUrl}/api/diary/reanalyze-day`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date: '2023-05-28', uploadMinScore: 0 }),
+  });
+  assert.equal(shortBatch.status, 202);
+  const shortDone = await until(status, s => !s.active);
+  assert.equal(shortDone.failed, 0, JSON.stringify(shortDone.errors));
+  assert.equal(shortDone.completed, 2, 'a streamless file does not stop the batch');
+  assert.equal(received - beforeShort, 1, 'only the following audio is analyzed');
+  const note = getDiaryEntry(db, short.id);
+  assert.equal(note.kind, 'note');
+  assert.equal(note.label, short.label);
+  assert.equal(note.datetimeLocal, short.datetimeLocal);
+  assert.equal(note.waveformPath, null);
+  assert.equal(note.durationSec, 0);
+  assert.ok(getDiaryEntry(db, following.id));
+  assert.equal(fs.readFileSync(path.join(store, short.audioPath), 'utf8'), 'original compressed audio');
+  assert.equal(fs.readFileSync(path.join(store, short.audioPath.replace('audio/', 'historical-recordings-archive/')), 'utf8'), 'original compressed audio');
+  const notes = await fetch(`${publicApi.baseUrl}/api/diary`).then(r => r.json());
+  assert.equal(notes.find(e => e.id === short.id).reanalyzable, false);
+  const updatedIndex = JSON.parse(fs.readFileSync(path.join(store, 'index.json'), 'utf8'));
+  assert.equal(updatedIndex.find(e => e.id === short.id).kind, 'note');
   assert.equal(getMonitorParamsMap(db).upload_min_score, .99, 'single and day overrides leave live settings unchanged');
 });
