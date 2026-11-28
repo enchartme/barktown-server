@@ -8,3 +8,17 @@ fs.stat = async function (file, ...args) {
   if (String(file).startsWith(archive)) throw Object.assign(new Error('Mount cache has not refreshed'), { code: 'ENOENT', path: file });
   return stat.call(this, file, ...args);
 };
+
+// The same mount can briefly deny a staging write before accepting a retry.
+const copyFile = fs.copyFile;
+const staging = path.join(process.env.HISTORICAL_TEST_STORE, 'historical-import-staging') + path.sep;
+let denied = false;
+fs.copyFile = async function (source, destination, ...args) {
+  if (!denied && String(destination).startsWith(staging)) {
+    denied = true;
+    throw Object.assign(new Error('Transient mount permission failure'), {
+      code: 'EACCES', syscall: 'copyfile', path: source, dest: destination,
+    });
+  }
+  return copyFile.call(this, source, destination, ...args);
+};

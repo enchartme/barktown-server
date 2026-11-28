@@ -16,7 +16,7 @@ import { runAudioCommand } from './lib/audio.mjs';
 import { runReanalyzeScript } from './lib/reanalyze.mjs';
 import { planHistoricalClips } from './lib/historical-recordings.mjs';
 import { decodeHistoricalSource, createHistoricalClipMedia, historicalStagingFiles } from './lib/historical-media.mjs';
-import { mountedObjectPath as mountPath, copyMountedHistoricalSource, commitWhenStagedFilesVisible } from './lib/historical-worker-files.mjs';
+import { mountedObjectPath as mountPath, copyMountedHistoricalSource, writeMountedHistoricalFile, commitWhenStagedFilesVisible } from './lib/historical-worker-files.mjs';
 
 loadEnv(import.meta.url);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +76,7 @@ function parseArgs(args) {
     '--bucket-root': 'bucketRoot', '--state-file': 'stateFile', '--workers': 'workers' };
   const remaining = [];
   for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--retry-review') { options.retryReview = true; continue; }
     const name = names[args[index]];
     if (!name) { remaining.push(args[index]); continue; }
     const value = args[++index];
@@ -91,6 +92,14 @@ function parseArgs(args) {
   if (options.bucketRoot) options.bucketRoot = path.resolve(options.bucketRoot);
   return { ...options, selection };
 }
+function reportCompletion(state, stateFile) {
+  console.log(`Done: ${state.completed.length} historical source(s) committed.`);
+  if (state.needsReview.length) {
+    console.warn(`REVIEW: ${state.needsReview.length} recording(s) require review. Details: ${stateFile}`);
+    console.warn('After resolving conflicts, rerun with --retry-review to retry those recordings.');
+    process.exitCode = 1;
+  }
+}
 async function main() {
   if (process.argv.includes('--help')) {
     console.log(`Usage: npm run historical-worker -- YYYY-MM-DD [options]
@@ -99,6 +108,7 @@ Options: --threshold N; --refractory SECONDS; --window SECONDS; --step SECONDS
          --upload-min-score N|any (any = 0; default from Pi monitor settings)
          --workers N (default 3); --bucket-root PATH (otherwise use MinIO API)
          --state-file PATH; --api-base URL; --public-api-base URL; --dry-run
+         --retry-review (retry recordings previously deferred for event conflicts)
 Run on the workstation. The Pi validates staged files and commits database changes.
 Rerun the same command and state file to resume.`);
     return;
@@ -122,7 +132,11 @@ Rerun the same command and state file to resume.`);
     }
     state = { version: 1, parameters, entries, completed: [], current: null };
   }
+  state.needsReview ??= [];
   if (state.completed.length === state.entries.length) { console.log('Done: all recordings in this checkpoint are complete.'); return; }
+  if (!options.retryReview && state.completed.length + state.needsReview.length === state.entries.length) {
+    reportCompletion(state, stateFile); return;
+  }
   const cfg = buildConfig();
   // This command always scores locally, even when .env points at the Pi analyzer.
   cfg.reanalyze.url = null;
@@ -170,80 +184,100 @@ Rerun the same command and state file to resume.`);
   }
   try {
     await writeJson(stateFile, state);
-    for (const entry of state.entries) {
+    const queue = [...state.entries.entries()];
+    // Finish an interrupted ticket before retrying any earlier review items.
+    const currentIndex = queue.findIndex(([, entry]) => entry.id === state.current?.entryId);
+    if (currentIndex > 0) queue.unshift(...queue.splice(currentIndex, 1));
+    for (const [entryIndex, entry] of queue) {
       if (state.completed.includes(entry.id)) continue;
+      if (!options.retryReview && state.needsReview.some(item => item.entryId === entry.id)) continue;
       if (state.current && state.current.entryId !== entry.id) throw new Error('Checkpoint current recording does not match its queue');
-      state.current ??= { entryId: entry.id, requestId: randomUUID() };
+      state.current ??= { entryId: entry.id,
+        requestId: state.needsReview.find(item => item.entryId === entry.id)?.requestId ?? randomUUID() };
       await writeJson(stateFile, state);
       const id = state.current.requestId;
       const work = `${stateFile}.files/${id}`;
       await fs.mkdir(work, { recursive: true });
-      console.log(`START ${state.completed.length + 1}/${state.entries.length} ${entry.id} — ${workers} local worker(s)`);
-      let ticket;
-      try { ticket = await requestJson(`${apiBase}/api/historical-imports/${id}`); }
-      catch (error) { if (error.statusCode !== 404) throw error; }
-      ticket ??= await requestJson(`${apiBase}/api/diary/${encodeURIComponent(entry.id)}/historical-import`, {
-        body: { ...selection.tuning, requestId: id }, timeoutMs: 120000,
-      });
-      let manifest = await readJson(path.join(work, 'manifest.json'));
-      if (!manifest && !ticket.result) {
-        const input = path.join(work, path.posix.basename(ticket.archiveKey));
-        const wav = path.join(work, 'source.wav');
-        let analysis = await readJson(path.join(work, 'analysis.json'));
-        if (!analysis) {
-          console.log(`READ  ${ticket.archiveKey}`);
-          if (bucketRoot) {
-            const readKey = await copyMountedHistoricalSource({ bucketRoot, ticket, destination: input,
-              onWait: message => console.log(`WAIT  ${message}`) });
-            if (readKey !== ticket.archiveKey) console.log(`READ  ${readKey} — archive not visible in mount; Pi will verify its checksum`);
-          } else await download(mc, cfg.bucket, ticket.archiveKey, input);
-          const sourceSha256 = await hashFile(input);
-          console.log('DECODE on Mac');
-          const durationSec = await decodeHistoricalSource(cfg, input, wav);
-          console.log('SCORE on Mac');
-          const payload = await runReanalyzeScript(cfg, wav,
-            { monitorSettings: ticket.monitorSettings }, { workers, mode: 'replay' });
-          analysis = { payload, durationSec, sourceSha256 };
-          await writeJson(path.join(work, 'analysis.json'), analysis);
-        }
-        const clips = planHistoricalClips(ticket.entry, ticket.mediaConfig, analysis.payload,
-          analysis.durationSec, ticket.monitorSettings);
-        const planned = historicalStagingFiles(id, clips);
-        const files = [];
-        for (const [index, clip] of clips.entries()) {
-          console.log(`STAGE ${index + 1}/${clips.length} ${clip.filename}`);
-          const media = await createHistoricalClipMedia({ cfg: { ...cfg, ...ticket.mediaConfig },
-            clip, entry: ticket.entry, archiveKey: ticket.archiveKey, wav, directory: work });
-          for (const [offset, file] of media.entries()) {
-            const descriptor = planned[index * 3 + offset];
-            const size = (await fs.stat(file.path)).size;
-            const sha256 = await hashFile(file.path);
+      console.log(`START ${entryIndex + 1}/${state.entries.length} ${entry.id} — ${workers} local worker(s)`);
+      try {
+        let ticket;
+        try { ticket = await requestJson(`${apiBase}/api/historical-imports/${id}`); }
+        catch (error) { if (error.statusCode !== 404) throw error; }
+        ticket ??= await requestJson(`${apiBase}/api/diary/${encodeURIComponent(entry.id)}/historical-import`, {
+          body: { ...selection.tuning, requestId: id }, timeoutMs: 120000,
+        });
+        let manifest = await readJson(path.join(work, 'manifest.json'));
+        if (!manifest && !ticket.result && ticket.entry.kind !== 'note') {
+          const input = path.join(work, path.posix.basename(ticket.archiveKey));
+          const wav = path.join(work, 'source.wav');
+          let analysis = await readJson(path.join(work, 'analysis.json'));
+          if (!analysis) {
+            console.log(`READ  ${ticket.archiveKey}`);
             if (bucketRoot) {
-              const destination = mountPath(bucketRoot, descriptor.stagingKey);
-              await fs.mkdir(path.dirname(destination), { recursive: true });
-              const temporary = `${destination}.${process.pid}.tmp`;
-              await fs.copyFile(file.path, temporary); await fs.rename(temporary, destination);
-            } else await upload(mc, cfg.bucket, file.path, descriptor.stagingKey, file.contentType);
-            files.push({ key: descriptor.key, stagingKey: descriptor.stagingKey, size, sha256 });
+              const readKey = await copyMountedHistoricalSource({ bucketRoot, ticket, destination: input,
+                onWait: message => console.log(`WAIT  ${message}`) });
+              if (readKey !== ticket.archiveKey) console.log(`READ  ${readKey} — archive not visible in mount; Pi will verify its checksum`);
+            } else await download(mc, cfg.bucket, ticket.archiveKey, input);
+            const sourceSha256 = await hashFile(input);
+            console.log('DECODE on Mac');
+            const durationSec = await decodeHistoricalSource(cfg, input, wav);
+            console.log('SCORE on Mac');
+            const payload = await runReanalyzeScript(cfg, wav,
+              { monitorSettings: ticket.monitorSettings }, { workers, mode: 'replay' });
+            analysis = { payload, durationSec, sourceSha256 };
+            await writeJson(path.join(work, 'analysis.json'), analysis);
           }
+          const clips = planHistoricalClips(ticket.entry, ticket.mediaConfig, analysis.payload,
+            analysis.durationSec, ticket.monitorSettings);
+          const planned = historicalStagingFiles(id, clips);
+          const files = [];
+          for (const [index, clip] of clips.entries()) {
+            console.log(`STAGE ${index + 1}/${clips.length} ${clip.filename}`);
+            const media = await createHistoricalClipMedia({ cfg: { ...cfg, ...ticket.mediaConfig },
+              clip, entry: ticket.entry, archiveKey: ticket.archiveKey, wav, directory: work });
+            for (const [offset, file] of media.entries()) {
+              const descriptor = planned[index * 3 + offset];
+              const size = (await fs.stat(file.path)).size;
+              const sha256 = await hashFile(file.path);
+              if (bucketRoot) {
+                const destination = mountPath(bucketRoot, descriptor.stagingKey);
+                await writeMountedHistoricalFile(file.path, destination, {
+                  onWait: message => console.log(`WAIT  ${message}`),
+                });
+              } else await upload(mc, cfg.bucket, file.path, descriptor.stagingKey, file.contentType);
+              files.push({ key: descriptor.key, stagingKey: descriptor.stagingKey, size, sha256 });
+            }
+          }
+          manifest = { ...analysis, files };
+          await writeJson(path.join(work, 'manifest.json'), manifest);
         }
-        manifest = { ...analysis, files };
-        await writeJson(path.join(work, 'manifest.json'), manifest);
+        console.log('VERIFY and COMMIT on Pi');
+        const commit = () => requestJson(`${apiBase}/api/historical-imports/${id}/commit`, {
+          body: manifest ?? {}, timeoutMs: cfg.reanalyze.replayTimeoutMs,
+        });
+        const result = ticket.result ?? (bucketRoot
+          ? await commitWhenStagedFilesVisible(commit, { onWait: message => console.log(`WAIT  ${message}`) })
+          : await commit());
+        state.completed.push(entry.id); state.current = null;
+        state.needsReview = state.needsReview.filter(item => item.entryId !== entry.id);
+        await writeJson(stateFile, state);
+        console.log(`OK    ${entry.id} — ${result.replacementIds.length} event clip(s)`);
+        if (result.message) console.log(`NOTE  ${result.message}`);
+        for (const warning of result.cleanupWarnings ?? []) console.warn(warning);
+        await fs.rm(work, { recursive: true, force: true });
+      } catch (error) {
+        // Conflicts belong to this source, not the rest of the batch. Keep its
+        // ticket, analysis and staged files available for a deliberate retry.
+        if (!/^(Diary event already exists:|Event object already exists:|Historical event filenames collide$)/.test(error.message)) throw error;
+        state.needsReview = state.needsReview.filter(item => item.entryId !== entry.id);
+        state.needsReview.push({ entryId: entry.id, filename: entry.filename,
+          requestId: id, error: error.message, workDirectory: work, recordedAt: new Date().toISOString() });
+        state.current = null;
+        await writeJson(stateFile, state);
+        console.warn(`REVIEW ${entry.id} — ${error.message}; continuing with the next recording.`);
       }
-      console.log('VERIFY and COMMIT on Pi');
-      const commit = () => requestJson(`${apiBase}/api/historical-imports/${id}/commit`, {
-        body: manifest, timeoutMs: cfg.reanalyze.replayTimeoutMs,
-      });
-      const result = !manifest ? ticket.result : bucketRoot
-        ? await commitWhenStagedFilesVisible(commit, { onWait: message => console.log(`WAIT  ${message}`) })
-        : await commit();
-      state.completed.push(entry.id); state.current = null;
-      await writeJson(stateFile, state);
-      console.log(`OK    ${entry.id} — ${result.replacementIds.length} event clip(s)`);
-      for (const warning of result.cleanupWarnings ?? []) console.warn(warning);
-      await fs.rm(work, { recursive: true, force: true });
     }
-    console.log(`Done: ${state.completed.length} historical source(s) committed.`);
+    reportCompletion(state, stateFile);
   } finally { await fs.rm(lockPath, { force: true }); }
 }
 

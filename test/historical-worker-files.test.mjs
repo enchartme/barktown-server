@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { copyMountedHistoricalSource, commitWhenStagedFilesVisible, mountedObjectPath } from '../lib/historical-worker-files.mjs';
+import { copyMountedHistoricalSource, writeMountedHistoricalFile, commitWhenStagedFilesVisible, mountedObjectPath } from '../lib/historical-worker-files.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'barktown-mounted-source-'));
@@ -91,5 +91,40 @@ test('commit refuses actual integrity errors and bounds the staging visibility w
 test('mount paths stay inside the bucket', () => {
   for (const key of ['../secret', '/etc/passwd', 'audio/../secret', 'audio\\secret']) {
     assert.throws(() => mountedObjectPath('/bucket', key), /Invalid bucket-relative path/);
+  }
+});
+
+test('mounted staging retries permission errors during mkdir, copy and rename', async t => {
+  for (const operation of ['mkdir', 'copyFile', 'rename']) await t.test(operation, async () => {
+    let clock = 0, attempts = 0, renamed = false;
+    const messages = [];
+    await writeMountedHistoricalFile('/local/clip.wav', '/bucket/staging/0.wav', {
+      timeoutMs: 10, intervalMs: 2, now: () => clock,
+      sleep: async ms => { clock += ms; }, onWait: message => messages.push(message),
+      mkdir: async () => {}, copyFile: async () => {}, rename: async () => { renamed = true; },
+      [operation]: async (...args) => {
+        if (++attempts <= 2) throw Object.assign(new Error('Transient mount denial'), { code: attempts === 1 ? 'EACCES' : 'EPERM' });
+        if (operation === 'rename') {
+          assert.match(args[0], /0\.wav\.\d+\.tmp$/);
+          assert.equal(args[1], '/bucket/staging/0.wav');
+          renamed = true;
+        }
+      },
+    });
+    assert.equal(attempts, 3); assert.equal(clock, 4); assert.equal(renamed, true);
+    assert.equal(messages.length, 2);
+  });
+});
+
+test('mounted staging bounds permission retries and propagates other write errors immediately', async () => {
+  for (const code of ['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ENOENT']) {
+    let clock = 0, renames = 0;
+    const failure = Object.assign(new Error('Cannot write staging file'), { code });
+    await assert.rejects(writeMountedHistoricalFile('/local/clip.wav', '/bucket/staging/0.wav', {
+      timeoutMs: 5, intervalMs: 2, now: () => clock, sleep: async ms => { clock += ms; },
+      mkdir: async () => {}, copyFile: async () => { throw failure; }, rename: async () => { renames++; },
+    }), error => error === failure);
+    assert.equal(clock, ['EACCES', 'EPERM'].includes(code) ? 5 : 0);
+    assert.equal(renames, 0);
   }
 });

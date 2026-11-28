@@ -641,8 +641,12 @@ new archive is not visible yet, the worker reads the still-present original
 under `audio/`; the Pi verifies its SHA-256 against the archive before commit.
 If neither complete source is visible, the worker retries for up to two minutes.
 It also waits up to two minutes for staged uploads to become visible to the Pi.
-Permission errors, invalid media, checksum mismatches and changed sources still
-stop the batch. These waits retain the existing checkpoint.
+Mounted staging writes retry `EACCES` and `EPERM` every two seconds for up to
+two minutes, covering directory creation, copying to a temporary file and
+renaming it into place. These retries reuse the prepared clip without rescoring.
+Persistent permission errors, source-read permission errors, other write errors,
+invalid media, checksum mismatches and changed sources still stop the batch.
+These waits retain the existing checkpoint.
 
 For a mounted bucket, pass its **bucket root** (the directory containing
 `audio/`, `waveforms/`, etc.). Preview first, then omit `--dry-run` to process:
@@ -684,13 +688,29 @@ nohup caffeinate -i node historical-worker.mjs \
   > ./data/mac-historical-2023.log 2>&1 < /dev/null &
 ```
 
+The selected queue can include entries already classified as text notes. Text notes
+still get an original-file copy in the historical archive, but invoke no decoder,
+probe, classifier or media generation. Their diary record, hits, public source and
+waveform stay unchanged. This also applies when resuming an older note ticket;
+the Pi returns a durable archive-only receipt and the worker continues its queue.
+Update the private API and workstation worker together for this behavior.
+
 Rerun the same command and state file to resume. The checkpoint preserves the
 selected queue, frozen ticket and completed recordings, including sources with
 zero events. Scores are saved before encoding, so an interrupted upload can
 resume without rescoring. Commit receipts and partial-publication intent live
 in the Pi's SQLite database and survive API restarts; retrying a lost commit
-response cannot duplicate diary entries. The worker stops at the first error
-and retains its checkpoint and work files for recovery. Keep the state file
+response cannot duplicate diary entries. Event ID and final-object collisions
+are recorded in the checkpoint's `needsReview` array, and the worker continues
+with the next source. Timestamp-based event IDs can collide when different
+source recordings produce clips starting in the same second. Existing events
+are preserved, along with the conflicting source, ticket, analysis and staged
+files. The final summary reports the review count and checkpoint path; the
+process exits with status `1` after finishing the queue if review is needed.
+Normal reruns leave these review items alone. After resolving a conflict, add
+`--retry-review` to the same command to retry it using its saved ticket and work.
+Other errors still stop the worker and retain its checkpoint for recovery.
+Keep the state file
 and its adjacent `.files/` directory together. Checkpoints are locked to one
 worker process at a time. Scoring itself does not reserve the Pi's analyzer;
 an overlapping import or source change causes validation to refuse the commit.

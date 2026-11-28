@@ -46,7 +46,7 @@ async function setup(t) {
   fs.writeFileSync(analyzer, `import fs from 'node:fs';
     const args = process.argv.slice(2);
     const settings = JSON.parse(args[args.indexOf('--monitor-settings-json')+1]);
-    if(args[args.indexOf('--workers')+1] !== '3') throw new Error('Expected three local workers');
+    if(args[args.indexOf('--workers')+1] !== (process.env.HISTORICAL_TEST_WORKERS ?? '3')) throw new Error('Unexpected local worker count');
     if(args[args.indexOf('--mode')+1] !== 'replay') throw new Error('Expected replay');
     fs.appendFileSync(${JSON.stringify(path.join(tmp, 'analysis-count'))}, 'scored\\n');
     console.log(JSON.stringify((${replay.toString()})(settings)));
@@ -245,6 +245,46 @@ test('Mac CLI supports mounted and S3 buckets, read-only previews and completed 
   });
 });
 
+test('Mac CLI resumes an existing text-note ticket by archiving only, then processes the following audio', async t => {
+  const f = await setup(t);
+  const binary = path.join(f.tmp, 'audio-tool');
+  fs.writeFileSync(binary, fs.readFileSync(binary, 'utf8').replace(
+    "if (args.includes('-version')", "if (args.includes('-i') && args[args.indexOf('-i') + 1].includes('text-note')) throw new Error('Notes must never be decoded');\n    if (args.includes('-version')",
+  ));
+  const note = { ...f.seed('2023-05-31 12-00-00 text-note.m4a'), kind: 'note', durationSec: 0 };
+  upsertDiaryEntry(f.db, note);
+  upsertDiaryNote(f.db, note.id, 'Preserve this note');
+  const following = f.seed();
+  const before = getDiaryEntry(f.db, note.id);
+  const ticket = await f.begin(note);
+  const checkpoint = path.join(f.tmp, 'note-checkpoint.json');
+  fs.writeFileSync(checkpoint, JSON.stringify({ version: 1,
+    parameters: { apiBase: f.privateUrl(), publicApiBase: f.publicApi.baseUrl,
+      startDate: '2023-05-31', endDate: '2023-05-31', tuning: {} },
+    entries: [note, following], completed: [], current: { entryId: note.id, requestId: ticket.id },
+  }));
+  const run = await execute(process.execPath, ['historical-worker.mjs', '2023-05-31',
+    '--api-base', f.privateUrl(), '--public-api-base', f.publicApi.baseUrl,
+    '--state-file', checkpoint, '--bucket-root', f.store], {
+    cwd: new URL('..', import.meta.url), env: { ...process.env, ...f.env },
+  });
+  assert.match(run.stdout, /Text note archived; original recording retained/);
+  assert.match(run.stdout, /2 historical source\(s\) committed/);
+  assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), 'scored\n', 'only the audio is scored');
+  assert.deepEqual(getDiaryEntry(f.db, note.id), before);
+  assert.equal(getDiaryNote(f.db, note.id).label, 'Preserve this note');
+  assert.equal(getHitMetadata(f.db, note.id), null);
+  for (const key of [note.audioPath, note.waveformPath, ticket.archiveKey]) {
+    assert.equal(fs.readFileSync(path.join(f.store, key), 'utf8'), 'original source bytes');
+  }
+  const receipt = await f.api(`/api/historical-imports/${ticket.id}`);
+  assert.deepEqual(receipt.body.result.replacementIds, []);
+  await f.restart();
+  const retry = await f.api(`/api/historical-imports/${ticket.id}/commit`, {});
+  assert.equal(retry.status, 200);
+  assert.deepEqual(retry.body, receipt.body.result);
+});
+
 test('Mac CLI recovers a lost commit response without rescoring or duplicating entries', async t => {
   const f = await setup(t); f.seed();
   let drop = true;
@@ -268,7 +308,7 @@ test('Mac CLI recovers a lost commit response without rescoring or duplicating e
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM diary_entries').get().count, 1);
 });
 
-test('Mac CLI processes the full queue despite an invisible archive and delayed staged uploads', async t => {
+test('Mac CLI processes the full queue despite archive lag, transient staging permissions and delayed uploads', async t => {
   const f = await setup(t);
   f.seed('2023-05-30 12-00-00 first.m4a'); f.seed();
   let pending = true;
@@ -294,7 +334,60 @@ test('Mac CLI processes the full queue despite an invisible archive and delayed 
     env: { ...process.env, ...f.env, NODE_OPTIONS: `${f.env.NODE_OPTIONS} --import=${delay}` } });
   assert.equal((result.stdout.match(/archive not visible in mount/g) ?? []).length, 2);
   assert.match(result.stdout, /Waiting for mounted uploads to reach the Pi/);
+  assert.match(result.stdout, /Mounted upload denied access \(EACCES\); retrying/);
   assert.match(result.stdout, /2 historical source\(s\) committed/);
   assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), 'scored\nscored\n');
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.tmp, 'checkpoint.json'))).completed.length, 2);
+});
+
+test('Mac CLI defers a collision from its own earlier source and completes the remaining queue', async t => {
+  const f = await setup(t);
+  const first = f.seed('2023-05-30 12-00-00 a-first.m4a');
+  const overlapping = f.seed('2023-05-30 12-00-00 b-overlap.m4a');
+  const following = f.seed();
+  const checkpoint = path.join(f.tmp, 'checkpoint.json');
+  const args = ['historical-worker.mjs', '--start-date', '2023-05-30', '--end-date', '2023-05-31',
+    '--api-base', f.privateUrl(), '--public-api-base', f.publicApi.baseUrl,
+    '--state-file', checkpoint, '--bucket-root', f.store, '--workers', '6'];
+  const options = { cwd: new URL('..', import.meta.url),
+    env: { ...process.env, ...f.env, HISTORICAL_TEST_WORKERS: '6' } };
+  async function runWithReview(extra = []) {
+    try { await execute(process.execPath, [...args, ...extra], options); assert.fail('Expected review exit status'); }
+    catch (error) {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /REVIEW/);
+      assert.doesNotMatch(error.stderr, /STOP:/);
+      return error;
+    }
+  }
+  const result = await runWithReview();
+  assert.match(result.stdout, /2 historical source\(s\) committed/);
+  assert.match(result.stdout, /6 local worker\(s\)/);
+  const state = JSON.parse(fs.readFileSync(checkpoint));
+  assert.deepEqual(state.completed, [first.id, following.id]);
+  assert.equal(state.current, null);
+  assert.equal(state.needsReview.length, 1);
+  const review = state.needsReview[0];
+  assert.equal(review.entryId, overlapping.id);
+  assert.match(review.error, /Diary event already exists:/);
+  assert.ok(fs.existsSync(path.join(review.workDirectory, 'manifest.json')));
+  assert.ok(getDiaryEntry(f.db, overlapping.id), 'conflicting source remains for review');
+  assert.ok(fs.existsSync(path.join(f.store, overlapping.audioPath)));
+  assert.equal(getDiaryEntry(f.db, first.id), undefined);
+  assert.equal(getDiaryEntry(f.db, following.id), undefined);
+  const ticket = await f.api(`/api/historical-imports/${review.requestId}`);
+  assert.ok(fs.existsSync(path.join(f.store, ticket.body.archiveKey)));
+  const firstEvent = planHistoricalClips(first, ticket.body.mediaConfig,
+    replay(ticket.body.monitorSettings), 8, ticket.body.monitorSettings)[0];
+  assert.equal(getDiaryEntry(f.db, firstEvent.id).sourceRecording.filename, first.filename,
+    'the earlier event is not overwritten by the overlapping source');
+  const scores = fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8');
+  await runWithReview();
+  assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), scores);
+  const retry = await runWithReview(['--retry-review']);
+  assert.match(retry.stdout, new RegExp(overlapping.id));
+  assert.equal(fs.readFileSync(path.join(f.tmp, 'analysis-count'), 'utf8'), scores, 'retry reuses the staged analysis');
+  const after = JSON.parse(fs.readFileSync(checkpoint));
+  assert.equal(after.needsReview[0].requestId, review.requestId);
+  assert.equal(after.needsReview.length, 1);
 });
