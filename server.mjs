@@ -62,7 +62,7 @@ import {
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, applyAnnotationWindowReview,
   deleteAnnotationRow, replaceSampleAnalysisFragments,
-  listDiaryEntries, getLatestDiaryDate, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
+  listDiaryEntries, getLatestDiaryDate, getEvidenceSummary, listDiarySummaryByDate, getDiaryEntry, setDiaryTrim, setDiaryApproved, deleteDiaryEntryRow,
   autoApproveDay, listApprovalEvents,
   listDiaryCommentAnnotations, getDiaryNote, upsertDiaryNote, deleteDiaryNote,
   upsertHitMetadata, saveReanalysisResult, getHitMetadata, listHitMetadataPage, deleteHitMetadataRow,
@@ -665,6 +665,9 @@ publicApi.get("/api/recording-context", async () => ({
 
 // Lightweight bootstrap for date-bounded clients such as the report view.
 publicApi.get("/api/diary/latest-date", async () => ({ date: getLatestDiaryDate(db) }));
+
+// Method facts cover every diary row and full recordings with detected barks.
+publicApi.get("/api/evidence-summary", async () => getEvidenceSummary(db));
 
 // Additive report metrics for every date in one inclusive period. This keeps
 // hit filtering and persisted-trim semantics on the database side so clients

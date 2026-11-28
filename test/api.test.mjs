@@ -248,6 +248,15 @@ test("GET /api/diary-summary returns inclusive daily and period totals", async (
   assert.equal(privateRes.status, 404);
 });
 
+test("GET /api/evidence-summary returns unbounded corpus facts publicly", async () => {
+  const res = await fetch(`${publicServer.baseUrl}/api/evidence-summary`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    firstDate: "2026-01-01", records: 4, barks: 6, recordedTimeBarkingSec: 24,
+  });
+  assert.equal((await fetch(`${privateServer.baseUrl}/api/evidence-summary`)).status, 404);
+});
+
 test("GET /api/diary-summary requires a valid bounded period", async () => {
   for (const query of [
     "",

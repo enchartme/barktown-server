@@ -194,6 +194,7 @@ npm run server:private
 | `GET /api/diary` | List diary entries with a live `reanalyzable` indication; optionally filter inclusively with `startDate`/`endDate` |
 | `GET /api/diary/latest-date` | Return the newest available diary date without loading diary entries |
 | `GET /api/diary-summary` | Return records, trimmed disturbed time and bark counts for every day and the totals in an inclusive `startDate`/`endDate` period |
+| `GET /api/evidence-summary` | Whole-corpus Method facts: earliest diary date, all diary rows, detected barks and full duration of recordings with barks; ignores report dates and trims |
 | `GET /api/diary/:id` | Get one diary entry with a live `reanalyzable` indication |
 | `GET /api/hit-metadata` | Bulk hit metadata, optionally filtered by inclusive `startDate`/`endDate`; 1-based `page`, max `pageSize` 1000 |
 | `GET /api/diary/:id/hit-metadata` | Get hit metadata and analysis provenance for one clip |
